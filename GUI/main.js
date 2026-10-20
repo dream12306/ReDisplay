@@ -389,17 +389,43 @@ function installClientApk(serial) {
     if (!apk || !fs.existsSync(apk)) {
         return Promise.resolve({ success: false, error: '未在系统中找到 ReDisplay.apk' });
     }
-    const cmd = serial ? `"${adb}" -s ${serial} install -r "${apk}"` : `"${adb}" install -r "${apk}"`;
+    const deviceArgs = serial ? ['-s', serial] : [];
+    // Non-streaming install avoids INSTALL_FAILED_USER_RESTRICTED on some
+    // MIUI/HyperOS devices while still using the normal Package Manager path.
+    const installArgs = [...deviceArgs, 'install', '--no-streaming', '-r', apk];
+
+    const resultText = (stdout, stderr) => `${stdout || ''}${stderr || ''}`;
+    const formatInstallResult = (err, stdout, stderr) => {
+        const out = resultText(stdout, stderr);
+        if (out.includes('Success')) {
+            return { success: true, message: '客户端应用安装成功' };
+        }
+        if (out.includes('INSTALL_FAILED_USER_RESTRICTED')) {
+            return { success: false, error: '设备限制了USB安装，请在安卓【开发者选项】中开启【USB安装 (允许通过USB安装应用)】' };
+        }
+        return { success: false, error: out.trim() || err?.message || '安装失败' };
+    };
+
     return new Promise((resolve) => {
-        exec(cmd, (err, stdout, stderr) => {
-            const out = (stdout || '') + (stderr || '');
-            if (out.includes('Success')) {
-                resolve({ success: true, message: '客户端应用安装成功' });
-            } else if (out.includes('INSTALL_FAILED_USER_RESTRICTED')) {
-                resolve({ success: false, error: '设备限制了USB安装，请在安卓【开发者选项】中开启【USB安装 (允许通过USB安装应用)】' });
-            } else {
-                resolve({ success: false, error: out.trim() || err?.message || '安装失败' });
+        execFile(adb, installArgs, (err, stdout, stderr) => {
+            const firstOut = resultText(stdout, stderr);
+            if (!firstOut.includes('INSTALL_FAILED_UPDATE_INCOMPATIBLE')) {
+                resolve(formatInstallResult(err, stdout, stderr));
+                return;
             }
+
+            // Older hand-built APKs were signed with a different debug key.
+            // This path runs only after the user explicitly requests install.
+            execFile(adb, [...deviceArgs, 'uninstall', 'com.redisplay.client'], (uninstallErr, uninstallStdout, uninstallStderr) => {
+                const uninstallOut = resultText(uninstallStdout, uninstallStderr);
+                if (uninstallErr || !uninstallOut.includes('Success')) {
+                    resolve({ success: false, error: `旧版客户端签名不兼容，自动卸载失败：${uninstallOut.trim() || uninstallErr?.message}` });
+                    return;
+                }
+                execFile(adb, installArgs, (retryErr, retryStdout, retryStderr) => {
+                    resolve(formatInstallResult(retryErr, retryStdout, retryStderr));
+                });
+            });
         });
     });
 }

@@ -71,13 +71,13 @@ public class VideoDecoder {
                 format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
             } catch (Exception ignored) {}
             try {
-                format.setInteger(MediaFormat.KEY_OPERATING_RATE, Math.max(fps * 10, 1200)); // Clock boost
+                format.setInteger(MediaFormat.KEY_OPERATING_RATE, Math.max(fps, 60));
             } catch (Exception ignored) {}
 
             codec.configure(format, surface, null, 0);
             codec.start();
             isConfigured = true;
-            Log.i(TAG, "[Stage 6 MediaCodec Param] KEY_FRAME_RATE=" + fps + ", KEY_OPERATING_RATE=" + Math.max(fps * 10, 1200));
+            Log.i(TAG, "[Stage 6 MediaCodec Param] KEY_FRAME_RATE=" + fps + ", KEY_OPERATING_RATE=" + Math.max(fps, 60));
             Log.i(TAG, "Hardware decoder started: " + codec.getName() + " (" + width + "x" + height + " @" + fps + "Hz)");
         } catch (IOException e) {
             Log.e(TAG, "Failed to create decoder: " + e.getMessage(), e);

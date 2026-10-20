@@ -35,6 +35,17 @@ if %errorlevel% neq 0 exit /b 1
 del "%HOST_DIR%bounded_frame_queue_test.exe" >nul 2>&1
 del "%HOST_DIR%bounded_frame_queue_test.obj" >nul 2>&1
 
+echo Running stream latency policy regression tests...
+cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
+    /I "%SRC_DIR%" ^
+    "%HOST_DIR%tests\stream_latency_policy_test.cpp" ^
+    /Fe:"%HOST_DIR%stream_latency_policy_test.exe"
+if %errorlevel% neq 0 exit /b 1
+"%HOST_DIR%stream_latency_policy_test.exe"
+if %errorlevel% neq 0 exit /b 1
+del "%HOST_DIR%stream_latency_policy_test.exe" >nul 2>&1
+del "%HOST_DIR%stream_latency_policy_test.obj" >nul 2>&1
+
 echo Running ADB path resolution regression test...
 cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
     /I "%SRC_DIR%" ^

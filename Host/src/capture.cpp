@@ -145,7 +145,7 @@ void ScreenCapture::Start() {
         // Keep the encoder responsive without preempting system input, DWM, or
         // background disk work with a TIME_CRITICAL base priority of 15.
         m_impl->workerThread = std::thread([this]() {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
             while (m_impl->running) {
                 DWORD wr = WaitForSingleObject(m_impl->hFrameEvent, 10);
                 if (!m_impl->running) break;

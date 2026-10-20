@@ -86,14 +86,17 @@ public:
         });
     }
 
-    void Push(EncodedPacket&& pkt) {
-        if (!m_connectionAlive || !m_running) return;
+    size_t Push(EncodedPacket&& pkt) {
+        if (!m_connectionAlive || !m_running) return 0;
+        size_t dropped = 0;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             const bool isKeyframe = (pkt.hdr.flags & FLAG_KEYFRAME) != 0;
-            m_droppedFrames += m_queue.Push(std::move(pkt), isKeyframe);
+            dropped = m_queue.Push(std::move(pkt), isKeyframe);
+            m_droppedFrames += dropped;
         }
         m_cv.notify_one();
+        return dropped;
     }
 
     void Stop() {
@@ -360,7 +363,7 @@ int main(int argc, char* argv[]) {
             sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             int flag = 1;
             setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
-            int sendBuf = 4 * 1024 * 1024;
+            const int sendBuf = (bufferMode == "smooth") ? 4 * 1024 * 1024 : 256 * 1024;
             setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&sendBuf, sizeof(sendBuf));
             DWORD sendTimeoutMs = 2000;
             setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&sendTimeoutMs, sizeof(sendTimeoutMs));
@@ -552,7 +555,10 @@ int main(int argc, char* argv[]) {
                 pkt.frameIdx = frameIndex;
 
                 // Non-blocking handoff to async socket dispatcher (<0.01ms)
-                asyncSender.Push(std::move(pkt));
+                const size_t dropped = asyncSender.Push(std::move(pkt));
+                if (dropped > 0 && !isKeyframe) {
+                    encoder.RequestIdr();
+                }
             }
         });
 

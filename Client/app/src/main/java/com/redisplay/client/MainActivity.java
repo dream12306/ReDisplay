@@ -37,6 +37,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     private final Handler handler = new Handler(Looper.getMainLooper());
     private GestureDetector gestureDetector;
     private Runnable hideOverlayRunnable;
+    private int negotiatedFps = 120;
 
     private final ServiceConnection serviceConn = new ServiceConnection() {
         @Override
@@ -69,9 +70,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
             getWindow().setAttributes(lp);
         }
-
-        // Lock refresh rate to 120Hz
-        setup120HzRefreshRate();
 
         // Initialize persistent Decoder and Network Server
         decoder = new VideoDecoder(2800, 1752);
@@ -161,24 +159,44 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         });
     }
 
-    private void setup120HzRefreshRate() {
+    private void applyPreferredRefreshRate(int requestedFps) {
+        negotiatedFps = requestedFps > 0 ? requestedFps : 120;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Display display = getDisplay();
             if (display != null) {
                 Display.Mode[] modes = display.getSupportedModes();
                 Display.Mode bestMode = null;
-                float maxFps = 0.0f;
+                Display.Mode currentMode = display.getMode();
+                float bestScore = Float.MAX_VALUE;
                 for (Display.Mode mode : modes) {
-                    if (mode.getRefreshRate() > maxFps) {
-                        maxFps = mode.getRefreshRate();
+                    float resolutionPenalty = (currentMode != null
+                            && (mode.getPhysicalWidth() != currentMode.getPhysicalWidth()
+                            || mode.getPhysicalHeight() != currentMode.getPhysicalHeight())) ? 1000.0f : 0.0f;
+                    float score = resolutionPenalty + Math.abs(mode.getRefreshRate() - negotiatedFps);
+                    if (score < bestScore) {
+                        bestScore = score;
                         bestMode = mode;
                     }
                 }
-                if (bestMode != null && maxFps >= 119.0f) {
+                if (bestMode != null) {
                     WindowManager.LayoutParams lp = getWindow().getAttributes();
                     lp.preferredDisplayModeId = bestMode.getModeId();
                     getWindow().setAttributes(lp);
-                    Log.i(TAG, "Locked display mode to: " + bestMode.getPhysicalWidth() + "x" + bestMode.getPhysicalHeight() + " @" + maxFps + "Hz");
+                    Log.i(TAG, "Matched display mode to stream: " + bestMode.getPhysicalWidth() + "x" + bestMode.getPhysicalHeight() + " @" + bestMode.getRefreshRate() + "Hz (requested " + negotiatedFps + "Hz)");
+                }
+            }
+        }
+        if (surfaceView != null) {
+            Surface surface = surfaceView.getHolder().getSurface();
+            if (surface != null && surface.isValid() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        surface.setFrameRate((float) negotiatedFps, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT, Surface.CHANGE_FRAME_RATE_ALWAYS);
+                    } else {
+                        surface.setFrameRate((float) negotiatedFps, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Unable to request surface frame rate: " + e.getMessage());
                 }
             }
         }
@@ -238,15 +256,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i(TAG, "Surface created, attaching to decoder");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try {
-                holder.getSurface().setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT, Surface.CHANGE_FRAME_RATE_ALWAYS);
-            } catch (Exception ignored) {
-                holder.getSurface().setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
-            }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            holder.getSurface().setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
-        }
+        applyPreferredRefreshRate(negotiatedFps);
         decoder.setSurface(holder.getSurface());
     }
 
@@ -288,6 +298,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onResolutionChanged(int width, int height, int fps) {
         handler.post(() -> {
+            applyPreferredRefreshRate(fps);
             surfaceView.setVideoSize(width, height);
             if (height > width) {
                 setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);

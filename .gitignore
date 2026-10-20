@@ -54,6 +54,7 @@ $RECYCLE.BIN/
 # Electron build output
 /dist/
 /release/
+/release-*/
 *.blockmap
 latest*.yml
 builder-debug.yml

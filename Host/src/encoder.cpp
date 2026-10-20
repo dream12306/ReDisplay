@@ -1,5 +1,13 @@
 #include "encoder.h"
+#include <chrono>
 #include <iostream>
+
+namespace {
+uint64_t MonotonicTimeUs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}
 
 typedef NVENCSTATUS(NVENCAPI* PNVENCODEAPICREATEINSTANCE)(NV_ENCODE_API_FUNCTION_LIST* functionList);
 
@@ -22,6 +30,7 @@ bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, in
     m_height = height;
     m_fps = fps;
     m_bitrateMbps = bitrateMbps;
+    m_idrPolicy.Reset();
 
     m_hNvEnc = LoadLibraryA("nvEncodeAPI64.dll");
     if (!m_hNvEnc) {
@@ -179,7 +188,8 @@ bool NvEncoderD3D11::EncodeFrame(ID3D11Texture2D* pTexture, uint64_t frameIndex,
     picParams.outputBitstream = m_bitstreamBuffer;
     picParams.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
 
-    if (frameIndex == 0 || (frameIndex % (m_fps * 5) == 0)) {
+    const uint64_t nowUs = MonotonicTimeUs();
+    if (m_idrPolicy.ShouldForceIdr(nowUs)) {
         picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
     }
 
@@ -199,6 +209,7 @@ bool NvEncoderD3D11::EncodeFrame(ID3D11Texture2D* pTexture, uint64_t frameIndex,
 
             outBitstream.assign(ptr, ptr + size);
             isKeyframe = (lockParams.pictureType == NV_ENC_PIC_TYPE_IDR);
+            m_idrPolicy.OnFrameEncoded(isKeyframe, nowUs);
 
             m_nvList.nvEncUnlockBitstream(m_hEncoder, m_bitstreamBuffer);
         }

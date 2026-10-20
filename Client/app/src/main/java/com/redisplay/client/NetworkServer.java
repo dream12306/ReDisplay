@@ -65,7 +65,9 @@ public class NetworkServer implements Runnable {
 
                     Socket socket = serverSocket.accept();
                     socket.setTcpNoDelay(true);
-                    socket.setReceiveBufferSize(4 * 1024 * 1024); // 4MB buffer for 10Gbps link
+                    // Keep only a small amount of stale video in flight. The old
+                    // 4 MiB buffer could hide more than half a second at 60 Mbps.
+                    socket.setReceiveBufferSize(256 * 1024);
                     socket.setSendBufferSize(64 * 1024);
 
                     Log.i(TAG, "Host connected from: " + socket.getRemoteSocketAddress());
@@ -96,7 +98,7 @@ public class NetworkServer implements Runnable {
         long totalBytesInSec = 0;
         long rxVideoFrames = 0;
 
-        try (DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 1024 * 512));
+        try (DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 64 * 1024));
              DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
 
             while (running && !socket.isClosed()) {
