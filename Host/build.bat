@@ -6,13 +6,15 @@ echo ============================================================
 echo   Building ReDisplay Windows Host (ReDisplayHost.exe)
 echo ============================================================
 
-set VCVARS="C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsall.bat"
-if not exist %VCVARS% (
-    echo [ERROR] Visual Studio vcvarsall.bat not found at %VCVARS%!
+set "VCVARS=C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsall.bat"
+if not exist "%VCVARS%" set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
+if not exist "%VCVARS%" set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+if not exist "%VCVARS%" (
+    echo [ERROR] A supported Visual Studio C++ toolchain was not found.
     exit /b 1
 )
 
-call %VCVARS% x64 >nul 2>&1
+call "%VCVARS%" x64 >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to initialize MSVC environment!
     exit /b 1
@@ -21,6 +23,30 @@ if %errorlevel% neq 0 (
 set HOST_DIR=%~dp0
 set SRC_DIR=%HOST_DIR%src
 set INC_DIR=%HOST_DIR%include
+
+echo Running bounded network queue regression tests...
+cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
+    /I "%SRC_DIR%" ^
+    "%HOST_DIR%tests\bounded_frame_queue_test.cpp" ^
+    /Fe:"%HOST_DIR%bounded_frame_queue_test.exe"
+if %errorlevel% neq 0 exit /b 1
+"%HOST_DIR%bounded_frame_queue_test.exe"
+if %errorlevel% neq 0 exit /b 1
+del "%HOST_DIR%bounded_frame_queue_test.exe" >nul 2>&1
+del "%HOST_DIR%bounded_frame_queue_test.obj" >nul 2>&1
+
+echo Running ADB path resolution regression test...
+cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
+    /I "%SRC_DIR%" ^
+    "%HOST_DIR%tests\adb_path_test.cpp" ^
+    "%SRC_DIR%\adb.cpp" ^
+    /Fe:"%HOST_DIR%adb_path_test.exe"
+if %errorlevel% neq 0 exit /b 1
+"%HOST_DIR%adb_path_test.exe"
+if %errorlevel% neq 0 exit /b 1
+del "%HOST_DIR%adb_path_test.exe" >nul 2>&1
+del "%HOST_DIR%adb_path_test.obj" >nul 2>&1
+del "%HOST_DIR%adb.obj" >nul 2>&1
 
 echo Compiling C++20 sources with MSVC optimizations (/O2)...
 cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^

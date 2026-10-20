@@ -3,40 +3,84 @@
 #include <iostream>
 #include <sstream>
 #include <vector>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+static bool IsRegularFile(const fs::path& path) {
+    std::error_code ec;
+    return fs::is_regular_file(path, ec);
+}
+
+static fs::path GetExecutableDirectory() {
+    std::vector<char> buffer(32768, 0);
+    DWORD length = GetModuleFileNameA(NULL, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0 || length >= buffer.size()) return {};
+    return fs::path(std::string(buffer.data(), length)).parent_path();
+}
+
+static fs::path GetEnvironmentPath(const char* name) {
+    DWORD required = GetEnvironmentVariableA(name, NULL, 0);
+    if (required == 0) return {};
+    std::vector<char> value(required, 0);
+    if (GetEnvironmentVariableA(name, value.data(), required) == 0) return {};
+    return fs::path(value.data());
+}
 
 AdbManager::AdbManager() {
     FindAdbPath();
 }
 
 bool AdbManager::FindAdbPath() {
-    // 1. Current directory
-    if (GetFileAttributesA("adb.exe") != INVALID_FILE_ATTRIBUTES) {
-        m_adbPath = "adb.exe";
-        return true;
-    }
-    // 2. Relative resources/bin directory
-    const char* relPaths[] = {
-        "resources\\bin\\adb.exe",
-        "..\\resources\\bin\\adb.exe",
-        "..\\ReDisplay-Win64\\resources\\bin\\adb.exe",
-        "bin\\adb.exe",
-        "..\\bin\\adb.exe"
-    };
-    for (const char* p : relPaths) {
-        if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) {
-            char fullP[MAX_PATH];
-            GetFullPathNameA(p, MAX_PATH, fullP, NULL);
-            m_adbPath = fullP;
-            return true;
+    m_adbPath.clear();
+
+    std::vector<fs::path> candidates;
+    const fs::path explicitAdb = GetEnvironmentPath("REDISPLAY_ADB");
+    if (!explicitAdb.empty()) candidates.push_back(explicitAdb);
+
+    const fs::path exeDir = GetExecutableDirectory();
+    if (!exeDir.empty()) {
+        candidates.push_back(exeDir / "adb.exe");
+        candidates.push_back(exeDir / "bin" / "adb.exe");
+        candidates.push_back(exeDir / "resources" / "bin" / "adb.exe");
+        candidates.push_back(exeDir.parent_path() / "resources" / "bin" / "adb.exe");
+
+        // Development layouts often keep Android platform-tools beside the
+        // repository. Walk a few ancestors without depending on the CWD.
+        fs::path ancestor = exeDir;
+        for (int i = 0; i < 4 && !ancestor.empty(); ++i) {
+            candidates.push_back(ancestor / "platform-tools" / "adb.exe");
+            candidates.push_back(ancestor / "resources" / "bin" / "adb.exe");
+            fs::path parent = ancestor.parent_path();
+            if (parent == ancestor) break;
+            ancestor = parent;
         }
     }
-    // 3. QtScrcpy path
-    const char* qtPath = "C:\\Program Files\\QtScrcpy-win-x64-v3.2.0\\adb.exe";
-    if (GetFileAttributesA(qtPath) != INVALID_FILE_ATTRIBUTES) {
-        m_adbPath = qtPath;
+
+    for (const char* sdkVariable : { "ANDROID_SDK_ROOT", "ANDROID_HOME" }) {
+        const fs::path sdkRoot = GetEnvironmentPath(sdkVariable);
+        if (!sdkRoot.empty()) candidates.push_back(sdkRoot / "platform-tools" / "adb.exe");
+    }
+
+    const fs::path localAppData = GetEnvironmentPath("LOCALAPPDATA");
+    if (!localAppData.empty()) {
+        candidates.push_back(localAppData / "Android" / "Sdk" / "platform-tools" / "adb.exe");
+        candidates.push_back(localAppData / "ScreenExt" / "bin" / "adb.exe");
+    }
+
+    candidates.push_back("C:\\Program Files\\QtScrcpy-win-x64-v3.2.0\\adb.exe");
+    candidates.push_back(fs::current_path() / "adb.exe");
+    candidates.push_back(fs::current_path() / "resources" / "bin" / "adb.exe");
+
+    for (const auto& candidate : candidates) {
+        if (!IsRegularFile(candidate)) continue;
+        std::error_code ec;
+        const fs::path absolute = fs::absolute(candidate, ec);
+        m_adbPath = (ec ? candidate : absolute).string();
         return true;
     }
-    // 4. System PATH
+
+    // Final fallback: system PATH.
     char buffer[MAX_PATH];
     if (SearchPathA(NULL, "adb.exe", NULL, MAX_PATH, buffer, NULL) > 0) {
         m_adbPath = buffer;

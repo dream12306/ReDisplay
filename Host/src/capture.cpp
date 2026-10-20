@@ -1,6 +1,7 @@
 #include "capture.h"
 #include <iostream>
 #include <atomic>
+#include <algorithm>
 #include <mutex>
 #include <thread>
 #include <dxgi.h>
@@ -121,18 +122,15 @@ bool ScreenCapture::Initialize(ID3D11Device* pDevice, HMONITOR hMonitor, int tar
         m_impl->session.IsCursorCaptureEnabled(true);
     } catch (...) {}
 
-    // Set minimum update interval according to targetFps (unlocked 0ms for 120Hz+, exact interval for lower)
+    // Bound capture cadence to the configured target instead of allowing an
+    // unbounded high-refresh producer to overwhelm encoding and networking.
     try {
-        if (targetFps >= 120) {
-            winrt::Windows::Foundation::TimeSpan interval{ std::chrono::milliseconds(0) };
+        if (targetFps > 0) {
+            const int intervalUs = (std::max)(1, 1000000 / targetFps);
+            winrt::Windows::Foundation::TimeSpan interval{ std::chrono::microseconds(intervalUs) };
             m_impl->session.MinUpdateInterval(interval);
-            std::cout << "[Capture] Unlocked MinUpdateInterval (0ms) for high-refresh " << targetFps << "Hz" << std::endl;
-        } else if (targetFps > 0) {
-            int intervalMs = (int)(1000.0 / targetFps * 0.95);
-            if (intervalMs < 1) intervalMs = 1;
-            winrt::Windows::Foundation::TimeSpan interval{ std::chrono::milliseconds(intervalMs) };
-            m_impl->session.MinUpdateInterval(interval);
-            std::cout << "[Capture] Set MinUpdateInterval to " << intervalMs << "ms (target " << targetFps << "Hz)" << std::endl;
+            std::cout << "[Capture] Set MinUpdateInterval to " << intervalUs
+                      << "us (target " << targetFps << "Hz)" << std::endl;
         }
     } catch (...) {}
 
@@ -144,9 +142,10 @@ void ScreenCapture::Start() {
     if (m_impl->session && !m_impl->running) {
         m_impl->running = true;
 
-        // Dedicated high-priority worker thread for encoding
+        // Keep the encoder responsive without preempting system input, DWM, or
+        // background disk work with a TIME_CRITICAL base priority of 15.
         m_impl->workerThread = std::thread([this]() {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
             while (m_impl->running) {
                 DWORD wr = WaitForSingleObject(m_impl->hFrameEvent, 10);
                 if (!m_impl->running) break;

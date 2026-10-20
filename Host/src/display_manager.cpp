@@ -52,10 +52,10 @@ std::vector<DisplayInfo> DisplayManager::EnumerateDisplays() {
             AdapterInfo info;
             info.deviceString = dd.DeviceString;
             info.deviceId = dd.DeviceID;
-            info.isVirtual = (info.deviceString.find(L"Virtual") != std::wstring::npos ||
-                              info.deviceString.find(L"VDD") != std::wstring::npos ||
-                              info.deviceId.find(L"MTTVDD") != std::wstring::npos ||
-                              info.deviceId.find(L"ROOT\\DISPLAY") != std::wstring::npos);
+            // Auto-select only ReDisplay's packaged MttVDD device. Generic
+            // ROOT\DISPLAY matching can commandeer Parsec/ToDesk/Oray displays.
+            info.isVirtual = (info.deviceId.find(L"MTTVDD") != std::wstring::npos ||
+                              info.deviceString == L"Virtual Display Driver");
             adapters[dd.DeviceName] = info;
         }
     }

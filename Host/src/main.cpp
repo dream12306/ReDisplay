@@ -2,17 +2,17 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <timeapi.h>
 #include <iostream>
 #include <chrono>
 #include <thread>
 #include <atomic>
 #include <vector>
-#include <deque>
 #include <mutex>
 #include <condition_variable>
 #include <string>
 #include <iomanip>
+#include <limits>
+#include <algorithm>
 
 #include <winrt/Windows.Foundation.h>
 
@@ -21,11 +21,11 @@
 #include "display_manager.h"
 #include "encoder.h"
 #include "capture.h"
+#include "bounded_frame_queue.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "winmm.lib")
 
 struct EncodedPacket {
     PacketHeader hdr;
@@ -33,38 +33,49 @@ struct EncodedPacket {
     uint64_t frameIdx = 0;
 };
 
+static bool SendAll(SOCKET sock, const void* data, size_t size) {
+    const char* cursor = static_cast<const char*>(data);
+    while (size > 0) {
+        const int chunk = static_cast<int>((std::min)(
+            size,
+            static_cast<size_t>((std::numeric_limits<int>::max)())
+        ));
+        const int sent = send(sock, cursor, chunk, 0);
+        if (sent == SOCKET_ERROR || sent == 0) return false;
+        cursor += sent;
+        size -= static_cast<size_t>(sent);
+    }
+    return true;
+}
+
 class AsyncNetworkSender {
 public:
     AsyncNetworkSender(SOCKET s, std::atomic<bool>& alive, std::atomic<uint64_t>& fc, std::atomic<uint64_t>& tb, std::atomic<uint64_t>& df, int maxQueueSize = 2)
-        : m_sock(s), m_connectionAlive(alive), m_frameCount(fc), m_totalBytes(tb), m_droppedFrames(df), m_maxQueue(maxQueueSize) {}
+        : m_sock(s), m_connectionAlive(alive), m_frameCount(fc), m_totalBytes(tb),
+          m_droppedFrames(df), m_queue(static_cast<size_t>(maxQueueSize)) {}
 
     ~AsyncNetworkSender() { Stop(); }
 
     void Start() {
         m_running = true;
         m_thread = std::thread([this]() {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
             while (m_running && m_connectionAlive) {
                 EncodedPacket pkt;
                 {
                     std::unique_lock<std::mutex> lock(m_mutex);
                     m_cv.wait(lock, [this]() {
-                        return !m_running || !m_queue.empty() || !m_connectionAlive;
+                        return !m_running || !m_queue.Empty() || !m_connectionAlive;
                     });
                     if (!m_running || !m_connectionAlive) break;
-                    if (m_queue.empty()) continue;
-
-                    pkt = std::move(m_queue.front());
-                    m_queue.pop_front();
+                    if (!m_queue.TryPop(pkt)) continue;
                 }
 
-                int s1 = send(m_sock, (char*)&pkt.hdr, sizeof(pkt.hdr), 0);
-                if (s1 <= 0) {
+                if (!SendAll(m_sock, &pkt.hdr, sizeof(pkt.hdr))) {
                     m_connectionAlive = false;
                     break;
                 }
-                int s2 = send(m_sock, (char*)pkt.bitstream.data(), (int)pkt.bitstream.size(), 0);
-                if (s2 <= 0) {
+                if (!SendAll(m_sock, pkt.bitstream.data(), pkt.bitstream.size())) {
                     m_connectionAlive = false;
                     break;
                 }
@@ -79,20 +90,15 @@ public:
         if (!m_connectionAlive || !m_running) return;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            // Dynamic queue bound: drops non-keyframes when queue is full
-            if ((int)m_queue.size() >= m_maxQueue) {
-                if (!(m_queue.front().hdr.flags & FLAG_KEYFRAME)) {
-                    m_queue.pop_front();
-                    m_droppedFrames++;
-                }
-            }
-            m_queue.push_back(std::move(pkt));
+            const bool isKeyframe = (pkt.hdr.flags & FLAG_KEYFRAME) != 0;
+            m_droppedFrames += m_queue.Push(std::move(pkt), isKeyframe);
         }
         m_cv.notify_one();
     }
 
     void Stop() {
         m_running = false;
+        shutdown(m_sock, SD_BOTH);
         m_cv.notify_all();
         if (m_thread.joinable()) {
             m_thread.join();
@@ -105,10 +111,9 @@ private:
     std::atomic<uint64_t>& m_frameCount;
     std::atomic<uint64_t>& m_totalBytes;
     std::atomic<uint64_t>& m_droppedFrames;
-    int m_maxQueue = 2;
     std::mutex m_mutex;
     std::condition_variable m_cv;
-    std::deque<EncodedPacket> m_queue;
+    BoundedFrameQueue<EncodedPacket> m_queue;
     std::atomic<bool> m_running{ false };
     std::thread m_thread;
 };
@@ -153,7 +158,6 @@ static std::string EscapeJson(const std::string& input) {
 }
 
 int main(int argc, char* argv[]) {
-    timeBeginPeriod(1);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -172,7 +176,16 @@ int main(int argc, char* argv[]) {
     // Check for helper commands first
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--list-displays") {
+        if (arg == "--adb-path") {
+            AdbManager adb;
+            if (adb.GetAdbPath().empty()) {
+                std::cerr << "{\"type\":\"error\",\"message\":\"ADB not found\"}" << std::endl;
+                return 1;
+            }
+            std::cout << "{\"type\":\"adb_path\",\"path\":\""
+                      << EscapeJson(adb.GetAdbPath()) << "\"}" << std::endl;
+            return 0;
+        } else if (arg == "--list-displays") {
             auto displays = DisplayManager::EnumerateDisplays();
             std::cout << "{\"type\":\"displays\",\"displays\":[";
             for (size_t d = 0; d < displays.size(); ++d) {
@@ -191,6 +204,10 @@ int main(int argc, char* argv[]) {
             return 0;
         } else if (arg == "--list-devices") {
             AdbManager adb;
+            if (adb.GetAdbPath().empty()) {
+                std::cerr << "{\"type\":\"error\",\"message\":\"ADB not found\"}" << std::endl;
+                return 1;
+            }
             auto devs = adb.GetDevices();
             std::cout << "{\"type\":\"devices\",\"devices\":[";
             for (size_t d = 0; d < devs.size(); ++d) {
@@ -259,7 +276,7 @@ int main(int argc, char* argv[]) {
         if (isGui) {
             std::cout << "{\"type\":\"state\",\"status\":\"error\",\"message\":\"ADB not found\"}" << std::endl;
         } else {
-            std::cerr << "[ERROR] adb.exe not found! Please ensure ADB is installed." << std::endl;
+            std::cerr << "[ERROR] adb.exe not found. Install Android platform-tools or set REDISPLAY_ADB to adb.exe." << std::endl;
         }
         return 1;
     }
@@ -345,6 +362,8 @@ int main(int argc, char* argv[]) {
             setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
             int sendBuf = 4 * 1024 * 1024;
             setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&sendBuf, sizeof(sendBuf));
+            DWORD sendTimeoutMs = 2000;
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&sendTimeoutMs, sizeof(sendTimeoutMs));
 
             sockaddr_in addr = { 0 };
             addr.sin_family = AF_INET;
@@ -408,7 +427,7 @@ int main(int argc, char* argv[]) {
                         dmMode.dmDisplayFrequency = targetFps;
                         dmMode.dmFields |= DM_DISPLAYFREQUENCY;
                     }
-                    LONG ret = ChangeDisplaySettingsExW(disp.deviceName.c_str(), &dmMode, NULL, CDS_UPDATEREGISTRY, NULL);
+                    LONG ret = ChangeDisplaySettingsExW(disp.deviceName.c_str(), &dmMode, NULL, 0, NULL);
                     if (ret == DISP_CHANGE_SUCCESSFUL) {
                         disp.width = targetWidth;
                         disp.height = targetHeight;
@@ -437,8 +456,11 @@ int main(int argc, char* argv[]) {
         cfgPayload.height = htonl(targetHeight);
         cfgPayload.fps = htonl(targetFps);
 
-        send(sock, (char*)&cfgHeader, sizeof(cfgHeader), 0);
-        send(sock, (char*)&cfgPayload, sizeof(cfgPayload), 0);
+        if (!SendAll(sock, &cfgHeader, sizeof(cfgHeader)) ||
+            !SendAll(sock, &cfgPayload, sizeof(cfgPayload))) {
+            closesocket(sock);
+            continue;
+        }
 
         // Create D3D11 Device
         ID3D11Device* pD3DDevice = nullptr;
@@ -473,6 +495,7 @@ int main(int argc, char* argv[]) {
 
         // Streaming Stats & Active Motion Cadence Tracker
         std::atomic<uint64_t> frameCount{ 0 };
+        std::atomic<uint64_t> encodedFrameCount{ 0 };
         std::atomic<uint64_t> totalBytes{ 0 };
         std::atomic<uint64_t> droppedFrames{ 0 };
         std::atomic<uint64_t> totalEncodeTimeUs{ 0 };
@@ -496,7 +519,8 @@ int main(int argc, char* argv[]) {
             std::vector<uint8_t> bitstream;
             bool isKeyframe = false;
 
-            if (encoder.EncodeFrame(pTexture, frameCount.load(), bitstream, isKeyframe)) {
+            const uint64_t frameIndex = encodedFrameCount.fetch_add(1);
+            if (encoder.EncodeFrame(pTexture, frameIndex, bitstream, isKeyframe)) {
                 uint64_t nowUs = GetTimestampUs();
                 uint64_t encodeDuration = nowUs - t0;
                 totalEncodeTimeUs += encodeDuration;
@@ -525,7 +549,7 @@ int main(int argc, char* argv[]) {
                 pkt.hdr.timestamp_us = ((uint64_t)htonl(tsHi)) | (((uint64_t)htonl(tsLo)) << 32);
                 pkt.hdr.payload_size = htonl((uint32_t)bitstream.size());
                 pkt.bitstream = std::move(bitstream);
-                pkt.frameIdx = frameCount.load();
+                pkt.frameIdx = frameIndex;
 
                 // Non-blocking handoff to async socket dispatcher (<0.01ms)
                 asyncSender.Push(std::move(pkt));
@@ -564,6 +588,7 @@ int main(int argc, char* argv[]) {
 
         auto lastStatTime = std::chrono::steady_clock::now();
         uint64_t lastFrames = 0;
+        uint64_t lastEncodedFrames = 0;
         uint64_t lastBytes = 0;
         uint64_t lastWgcFrames = 0;
 
@@ -576,6 +601,7 @@ int main(int argc, char* argv[]) {
             lastStatTime = now;
 
             uint64_t currFrames = frameCount.load();
+            uint64_t currEncodedFrames = encodedFrameCount.load();
             uint64_t currBytes = totalBytes.load();
             uint64_t currWgcFrames = capture.GetArrivedFrameCount();
             uint64_t currDropped = droppedFrames.load();
@@ -605,11 +631,12 @@ int main(int argc, char* argv[]) {
 
             double wgcFps = isIdle ? 0.0 : (fps > 0 ? fps : (currWgcFrames - lastWgcFrames) / elapsed);
             double mbps = ((currBytes - lastBytes) * 8.0) / (elapsed * 1000000.0);
-            double avgEncodeMs = (currFrames > lastFrames) ? 
-                (double)(totalEncodeTimeUs.load()) / ((currFrames - lastFrames) * 1000.0) : 0.0;
+            double avgEncodeMs = (currEncodedFrames > lastEncodedFrames) ?
+                (double)(totalEncodeTimeUs.load()) / ((currEncodedFrames - lastEncodedFrames) * 1000.0) : 0.0;
             totalEncodeTimeUs = 0;
 
             lastFrames = currFrames;
+            lastEncodedFrames = currEncodedFrames;
             lastBytes = currBytes;
             lastWgcFrames = currWgcFrames;
 
@@ -653,6 +680,5 @@ int main(int argc, char* argv[]) {
     } else {
         std::cout << "\nReDisplay Host stopped." << std::endl;
     }
-    timeEndPeriod(1);
     return 0;
 }

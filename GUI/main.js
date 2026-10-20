@@ -24,9 +24,14 @@ let activeStreamSerial = '';
 let hasShownTrayTip = false;
 let lastTrayUpdateTime = 0;
 
+function resourcePath(...parts) {
+    return path.join(process.resourcesPath, ...parts);
+}
+
 // Dynamic Path Resolution
 function getHostExePath() {
     const candidates = [
+        resourcePath('bin', 'ReDisplayHost.exe'),
         path.join(__dirname, '..', 'bin', 'ReDisplayHost.exe'),
         path.join(__dirname, 'resources', 'bin', 'ReDisplayHost.exe'),
         path.join(__dirname, '..', 'Host', 'ReDisplayHost.exe'),
@@ -44,13 +49,19 @@ function getHostExePath() {
 
 function getAdbPath() {
     const candidates = [
+        process.env.REDISPLAY_ADB,
+        resourcePath('bin', 'adb.exe'),
         path.join(__dirname, '..', 'bin', 'adb.exe'),
         path.join(__dirname, 'resources', 'bin', 'adb.exe'),
         path.join(__dirname, '..', 'resources', 'bin', 'adb.exe'),
+        path.join(__dirname, '..', '..', 'platform-tools', 'adb.exe'),
         path.join(__dirname, '..', 'ReDisplay-Win64', 'resources', 'bin', 'adb.exe'),
         'C:\\Program Files\\QtScrcpy-win-x64-v3.2.0\\adb.exe',
-        path.join(process.env.LOCALAPPDATA || '', 'Android', 'Sdk', 'platform-tools', 'adb.exe')
-    ];
+        path.join(process.env.ANDROID_SDK_ROOT || '', 'platform-tools', 'adb.exe'),
+        path.join(process.env.ANDROID_HOME || '', 'platform-tools', 'adb.exe'),
+        path.join(process.env.LOCALAPPDATA || '', 'Android', 'Sdk', 'platform-tools', 'adb.exe'),
+        path.join(process.env.LOCALAPPDATA || '', 'ScreenExt', 'bin', 'adb.exe')
+    ].filter(Boolean);
     for (const p of candidates) {
         if (fs.existsSync(p)) return p;
     }
@@ -59,6 +70,7 @@ function getAdbPath() {
 
 function getApkPath() {
     const candidates = [
+        resourcePath('Client', 'ReDisplay.apk'),
         path.join(__dirname, '..', 'Client', 'ReDisplay.apk'),
         path.join(__dirname, 'resources', 'Client', 'ReDisplay.apk'),
         path.join(__dirname, '..', '..', 'Client', 'ReDisplay.apk'),
@@ -73,6 +85,7 @@ function getApkPath() {
 function getDriverScriptPath(action) {
     const scriptName = (action === 'uninstall') ? 'uninstall_driver.bat' : 'install_driver.bat';
     const candidates = [
+        resourcePath('Driver', scriptName),
         path.join(__dirname, '..', 'Driver', scriptName),
         path.join(__dirname, 'resources', 'Driver', scriptName),
         path.join(__dirname, '..', '..', 'Driver', scriptName),
@@ -107,8 +120,8 @@ function createWindow() {
 
     mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 
-    mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
-        console.log(`[Renderer] ${message}`);
+    mainWindow.webContents.on('console-message', (event, details) => {
+        console.log(`[Renderer] ${details.message}`);
     });
 
     // Fix: Safely handle minimize to tray on close without calling non-existent Tray.isSupported()

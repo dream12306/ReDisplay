@@ -5,7 +5,8 @@
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build:win": "electron-builder --win portable --x64"
   },
   "keywords": [
     "redisplay",
@@ -19,6 +20,65 @@
   "license": "MIT",
   "devDependencies": {
     "electron": "^44.4.3",
+    "electron-builder": "^26.15.3",
     "rcedit": "^5.0.1"
+  },
+  "build": {
+    "appId": "com.redisplay.desktop",
+    "productName": "ReDisplay",
+    "asar": true,
+    "compression": "maximum",
+    "directories": {
+      "output": "../release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../Host/ReDisplayHost.exe",
+        "to": "bin/ReDisplayHost.exe"
+      },
+      {
+        "from": "../../platform-tools/adb.exe",
+        "to": "bin/adb.exe"
+      },
+      {
+        "from": "../../platform-tools/AdbWinApi.dll",
+        "to": "bin/AdbWinApi.dll"
+      },
+      {
+        "from": "../../platform-tools/AdbWinUsbApi.dll",
+        "to": "bin/AdbWinUsbApi.dll"
+      },
+      {
+        "from": "../Client/ReDisplay.apk",
+        "to": "Client/ReDisplay.apk"
+      },
+      {
+        "from": "../Driver",
+        "to": "Driver",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "executableName": "ReDisplay",
+      "artifactName": "ReDisplay.${ext}"
+    }
   }
 }

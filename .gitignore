@@ -49,3 +49,32 @@ $RECYCLE.BIN/
 .idea/
 *.suo
 *.user
+
+
+# Electron build output
+/dist/
+/release/
+*.blockmap
+latest*.yml
+builder-debug.yml
+builder-effective-config.yaml
+
+# Host test executables
+/Host/*_test.exe
+
+# Android local/build configuration
+local.properties
+.cxx/
+.externalNativeBuild/
+*.jks
+*.keystore
+
+# Local secrets and signing certificates
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# Other OS files
+.DS_Store
