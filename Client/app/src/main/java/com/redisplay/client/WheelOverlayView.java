@@ -16,6 +16,8 @@ import java.util.List;
 public final class WheelOverlayView extends View {
     private static final int PAGE_MAIN = 0;
     private static final int PAGE_RECORDING = 1;
+    private static final int PAGE_MACRO_LIBRARY = 2;
+    private static final int MACROS_PER_PAGE = 14;
 
     private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -29,6 +31,8 @@ public final class WheelOverlayView extends View {
     private int selectedIndex = -1;
     private int page = PAGE_MAIN;
     private List<NetworkServer.WheelSlot> mainSlots = Collections.emptyList();
+    private List<NetworkServer.WheelSlot> macroItems = Collections.emptyList();
+    private int macroPage = 0;
     private final List<NetworkServer.WheelSlot> recordingSlots;
 
     public WheelOverlayView(Context context) {
@@ -55,6 +59,14 @@ public final class WheelOverlayView extends View {
             mainSlots = new ArrayList<>(config.slots);
             invalidate();
         }
+    }
+
+    public void setMacroCatalog(NetworkServer.MacroCatalog catalog) {
+        macroItems = catalog == null || catalog.items == null
+                ? Collections.emptyList()
+                : new ArrayList<>(catalog.items);
+        macroPage = 0;
+        invalidate();
     }
 
     public void showAt(float requestedX, float requestedY) {
@@ -103,6 +115,26 @@ public final class WheelOverlayView extends View {
             invalidate();
             return null;
         }
+        if (slot.action == NetworkServer.INPUT_ACTION_MACRO_LIBRARY) {
+            page = PAGE_MACRO_LIBRARY;
+            macroPage = 0;
+            selectedIndex = -1;
+            invalidate();
+            return null;
+        }
+        if (slot.action == NetworkServer.INPUT_ACTION_MACRO_PAGE_PREVIOUS) {
+            if (macroPage > 0) macroPage--;
+            else page = PAGE_MAIN;
+            selectedIndex = -1;
+            invalidate();
+            return null;
+        }
+        if (slot.action == NetworkServer.INPUT_ACTION_MACRO_PAGE_NEXT) {
+            macroPage++;
+            selectedIndex = -1;
+            invalidate();
+            return null;
+        }
         if (slot.action == NetworkServer.INPUT_ACTION_BACK) {
             page = PAGE_MAIN;
             selectedIndex = -1;
@@ -136,7 +168,9 @@ public final class WheelOverlayView extends View {
         borderPaint.setColor(Color.argb(190, 255, 255, 255));
         canvas.drawCircle(centerX, centerY, centerRadius - dp(2), borderPaint);
         textPaint.setTextSize(dp(12));
-        canvas.drawText(page == PAGE_RECORDING ? "REC" : "轮盘", centerX,
+        String centerLabel = page == PAGE_RECORDING ? "REC"
+                : page == PAGE_MACRO_LIBRARY ? "宏库" : "轮盘";
+        canvas.drawText(centerLabel, centerX,
                 centerY - (textPaint.ascent() + textPaint.descent()) / 2, textPaint);
     }
 
@@ -175,7 +209,32 @@ public final class WheelOverlayView extends View {
     }
 
     private List<NetworkServer.WheelSlot> activeSlots() {
-        return page == PAGE_RECORDING ? recordingSlots : mainSlots;
+        if (page == PAGE_RECORDING) return recordingSlots;
+        if (page == PAGE_MACRO_LIBRARY) return buildMacroPage();
+        return mainSlots;
+    }
+
+    private List<NetworkServer.WheelSlot> buildMacroPage() {
+        ArrayList<NetworkServer.WheelSlot> slots = new ArrayList<>(16);
+        slots.add(slot(
+                macroPage == 0 ? NetworkServer.INPUT_ACTION_BACK
+                        : NetworkServer.INPUT_ACTION_MACRO_PAGE_PREVIOUS,
+                macroPage == 0 ? "返回" : "上一页"
+        ));
+        int start = macroPage * MACROS_PER_PAGE;
+        for (int offset = 0; offset < MACROS_PER_PAGE; offset++) {
+            int index = start + offset;
+            slots.add(index < macroItems.size()
+                    ? macroItems.get(index)
+                    : slot(NetworkServer.INPUT_ACTION_NONE, "空"));
+        }
+        boolean hasNext = start + MACROS_PER_PAGE < macroItems.size();
+        slots.add(slot(
+                hasNext ? NetworkServer.INPUT_ACTION_MACRO_PAGE_NEXT
+                        : NetworkServer.INPUT_ACTION_BACK,
+                hasNext ? "下一页" : "返回"
+        ));
+        return slots;
     }
 
     private List<NetworkServer.WheelSlot> buildRecordingSlots() {
@@ -184,11 +243,11 @@ public final class WheelOverlayView extends View {
         slots.add(slot(NetworkServer.INPUT_ACTION_RECORD_STOP, "结束并保存"));
         slots.add(slot(NetworkServer.INPUT_ACTION_RECORD_CANCEL, "取消录制"));
         slots.add(slot(NetworkServer.INPUT_ACTION_SAVE_LAST_STROKE, "保存笔迹"));
-        slots.add(slot(NetworkServer.INPUT_ACTION_SAVE_LAST_TAP, "保存点击"));
+        slots.add(slot(NetworkServer.INPUT_ACTION_ENTER_MOUSE_MODE, "鼠标模式"));
         slots.add(slot(NetworkServer.INPUT_ACTION_BACK, "返回"));
-        slots.add(slot(NetworkServer.INPUT_ACTION_REPLAY_LATEST, "回放保存"));
+        slots.add(slot(NetworkServer.INPUT_ACTION_REPLAY_LATEST, "最近录制"));
         slots.add(slot(NetworkServer.INPUT_ACTION_REPLAY_LAST_STROKE, "重复笔迹"));
-        slots.add(slot(NetworkServer.INPUT_ACTION_REPLAY_LAST_TAP, "重复点击"));
+        slots.add(slot(NetworkServer.INPUT_ACTION_EXIT_MOUSE_MODE, "退出鼠标"));
         slots.add(slot(NetworkServer.INPUT_ACTION_RECORD_STOP, "停止"));
         slots.add(slot(NetworkServer.INPUT_ACTION_RECORD_CANCEL, "放弃"));
         slots.add(slot(NetworkServer.INPUT_ACTION_BACK, "主轮盘"));

@@ -7,6 +7,8 @@
 #include <string>
 #include <thread>
 
+#include "macro_library.h"
+
 class PenInputReceiver {
 public:
     PenInputReceiver(
@@ -16,7 +18,8 @@ public:
         LONG displayTop,
         int displayWidth,
         int displayHeight,
-        std::string macroDirectory
+        std::string macroDirectory,
+        MacroLibrary macroLibrary
     );
     ~PenInputReceiver();
 
@@ -37,6 +40,7 @@ private:
     int m_displayWidth;
     int m_displayHeight;
     std::string m_macroDirectory;
+    MacroLibrary m_macroLibrary;
     std::atomic<bool> m_running{ false };
     std::atomic<uint64_t> m_injectedEvents{ 0 };
     std::thread m_thread;

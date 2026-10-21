@@ -14,7 +14,9 @@
 #include <vector>
 
 #include "pen_macro.h"
+#include "pen_playback_policy.h"
 #include "pen_input_math.h"
+#include "input_mode.h"
 #include "protocol.h"
 
 namespace {
@@ -45,7 +47,7 @@ uint64_t MonotonicTimeUs() {
 }
 
 bool IsValidCommand(const InputCommandPayload& command) {
-    if (command.action > INPUT_ACTION_DOUBLE_CLICK) return false;
+    if (command.action > INPUT_ACTION_EXIT_MOUSE_MODE) return false;
     if ((command.modifiers & ~(INPUT_MODIFIER_CTRL | INPUT_MODIFIER_SHIFT |
         INPUT_MODIFIER_ALT | INPUT_MODIFIER_WIN)) != 0) return false;
     const uint16_t keyCode = ntohs(command.key_code);
@@ -87,18 +89,29 @@ void SendMouseClick(DWORD downFlag, DWORD upFlag, int clickCount) {
     SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
 }
 
+void SendMouseFlag(DWORD flag) {
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = flag;
+    SendInput(1, &input, sizeof(INPUT));
+}
+
 struct MacroFileHeader {
     char magic[4];
     uint32_t version;
     uint32_t eventCount;
 };
 
-bool SaveMacro(const std::string& directory, const std::vector<RecordedPenEvent>& events) {
+bool SaveMacroFile(
+    const std::string& directory,
+    const std::string& fileName,
+    const std::vector<RecordedPenEvent>& events
+) {
     if (directory.empty() || events.empty() || events.size() > 65536) return false;
     std::error_code error;
     std::filesystem::create_directories(std::filesystem::u8path(directory), error);
     if (error) return false;
-    const auto path = std::filesystem::u8path(directory) / "latest.rdm";
+    const auto path = std::filesystem::u8path(directory) / std::filesystem::u8path(fileName);
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) return false;
     const MacroFileHeader header{ {'R', 'D', 'M', '1'}, 1, static_cast<uint32_t>(events.size()) };
@@ -110,9 +123,37 @@ bool SaveMacro(const std::string& directory, const std::vector<RecordedPenEvent>
     return output.good();
 }
 
-std::vector<RecordedPenEvent> LoadMacro(const std::string& directory) {
+bool SaveMacro(const std::string& directory, const std::vector<RecordedPenEvent>& events) {
+    return SaveMacroFile(directory, "latest.rdm", events);
+}
+
+uint32_t SaveNewMacroRecording(
+    const std::string& directory,
+    const std::vector<RecordedPenEvent>& events
+) {
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+    uint32_t id = static_cast<uint32_t>(now & 0xFFFFFFFFu);
+    if (id == 0) id = 1;
+    for (uint32_t attempt = 0; attempt < 1000; ++attempt) {
+        const uint32_t candidate = id + attempt;
+        const std::string fileName = std::to_string(candidate) + ".rdm";
+        const auto path = std::filesystem::u8path(directory) / std::filesystem::u8path(fileName);
+        if (!std::filesystem::exists(path) && SaveMacroFile(directory, fileName, events)) {
+            SaveMacro(directory, events);
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+std::vector<RecordedPenEvent> LoadMacroFile(
+    const std::string& directory,
+    const std::string& fileName
+) {
     if (directory.empty()) return {};
-    const auto path = std::filesystem::u8path(directory) / "latest.rdm";
+    const auto path = std::filesystem::u8path(directory) / std::filesystem::u8path(fileName);
     std::ifstream input(path, std::ios::binary);
     MacroFileHeader header{};
     if (!input.read(reinterpret_cast<char*>(&header), sizeof(header)) ||
@@ -126,6 +167,10 @@ std::vector<RecordedPenEvent> LoadMacro(const std::string& directory) {
         static_cast<std::streamsize>(events.size() * sizeof(RecordedPenEvent))
     )) return {};
     return events;
+}
+
+std::vector<RecordedPenEvent> LoadMacro(const std::string& directory) {
+    return LoadMacroFile(directory, "latest.rdm");
 }
 
 class SyntheticPenInjector {
@@ -230,7 +275,7 @@ public:
         pen.pressure = MapNormalizedPenPressure(ntohs(wirePayload.pressure), inContact);
         pen.tiltX = tiltX;
         pen.tiltY = tiltY;
-        if (eraser) pen.penFlags |= PEN_FLAG_ERASER;
+        if (eraser) pen.penFlags |= PEN_FLAG_ERASER | PEN_FLAG_INVERTED;
         if (buttons & PEN_BUTTON_BARREL) pen.penFlags |= PEN_FLAG_BARREL;
 
         if (!InjectSyntheticPointerInput(m_device, &info, 1)) {
@@ -265,7 +310,7 @@ public:
         pen.pressure = 0;
         pen.tiltX = m_tiltX;
         pen.tiltY = m_tiltY;
-        if (m_eraser) pen.penFlags |= PEN_FLAG_ERASER;
+        if (m_eraser) pen.penFlags |= PEN_FLAG_ERASER | PEN_FLAG_INVERTED;
         InjectSyntheticPointerInput(m_device, &info, 1);
 
         m_inRange = false;
@@ -302,14 +347,16 @@ PenInputReceiver::PenInputReceiver(
     LONG displayTop,
     int displayWidth,
     int displayHeight,
-    std::string macroDirectory
+    std::string macroDirectory,
+    MacroLibrary macroLibrary
 ) : m_socket(socket),
     m_connectionAlive(connectionAlive),
     m_displayLeft(displayLeft),
     m_displayTop(displayTop),
     m_displayWidth(displayWidth),
     m_displayHeight(displayHeight),
-    m_macroDirectory(std::move(macroDirectory)) {}
+    m_macroDirectory(std::move(macroDirectory)),
+    m_macroLibrary(std::move(macroLibrary)) {}
 
 PenInputReceiver::~PenInputReceiver() {
     Stop();
@@ -335,22 +382,27 @@ void PenInputReceiver::Run() {
     const bool injectionAvailable = injector.Initialize();
     PenMacroRecorder recorder;
     std::vector<RecordedPenEvent> latestMacro = LoadMacro(m_macroDirectory);
+    PointerInputMode inputMode = PointerInputMode::Pen;
+    MouseInputState mouseInputState;
     std::mutex injectorMutex;
     std::mutex playbackWaitMutex;
     std::condition_variable playbackWait;
     std::atomic<bool> cancelPlayback{ false };
+    std::atomic<bool> playbackActive{ false };
     std::thread playbackThread;
 
     auto stopPlayback = [&]() {
         cancelPlayback = true;
         playbackWait.notify_all();
         if (playbackThread.joinable()) playbackThread.join();
+        playbackActive = false;
         cancelPlayback = false;
     };
 
     auto startPlayback = [&](std::vector<RecordedPenEvent> events) {
         stopPlayback();
         if (!injectionAvailable || events.empty()) return;
+        playbackActive = true;
         playbackThread = std::thread([&, events = std::move(events)]() {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
             uint64_t previousTimestamp = events.front().timestampUs;
@@ -373,6 +425,7 @@ void PenInputReceiver::Run() {
             }
             std::lock_guard<std::mutex> lock(injectorMutex);
             injector.Reset();
+            playbackActive = false;
         });
     };
 
@@ -386,6 +439,89 @@ void PenInputReceiver::Run() {
             normalizedY, m_displayTop, m_displayHeight, virtualTop
         ) + virtualTop;
         SetCursorPos(x, y);
+    };
+
+    auto resetMouseInput = [&]() {
+        if (mouseInputState.Reset()) SendMouseFlag(MOUSEEVENTF_LEFTUP);
+    };
+
+    auto injectMouse = [&](const PenPayload& pen) {
+        if (pen.action != PEN_ACTION_HOVER_EXIT) {
+            positionCursor(ntohs(pen.x), ntohs(pen.y));
+        }
+        const MouseInputTransition transition = mouseInputState.Handle(pen.action);
+        if (transition == MouseInputTransition::LeftDown) {
+            SendMouseFlag(MOUSEEVENTF_LEFTDOWN);
+            m_injectedEvents++;
+        } else if (transition == MouseInputTransition::LeftUp) {
+            SendMouseFlag(MOUSEEVENTF_LEFTUP);
+            m_injectedEvents++;
+        } else if (transition == MouseInputTransition::Move) {
+            m_injectedEvents++;
+        }
+    };
+
+    auto startMacro = [&](const MacroDefinition& definition, uint16_t anchorX, uint16_t anchorY) {
+        stopPlayback();
+        if (definition.steps.empty()) return;
+        playbackActive = true;
+        playbackThread = std::thread([&, definition, anchorX, anchorY]() {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+            auto waitFor = [&](std::chrono::microseconds duration) {
+                std::unique_lock<std::mutex> waitLock(playbackWaitMutex);
+                return playbackWait.wait_for(waitLock, duration, [&]() {
+                    return cancelPlayback.load() || !m_running || !m_connectionAlive;
+                });
+            };
+            auto playPenEvents = [&](std::vector<RecordedPenEvent> events) {
+                if (events.empty()) return;
+                events = PenMacroRecorder::Reanchor(events, anchorX, anchorY);
+                uint64_t previousTimestamp = events.front().timestampUs;
+                for (const auto& event : events) {
+                    if (cancelPlayback || !m_running || !m_connectionAlive) return;
+                    const uint64_t delayUs = event.timestampUs >= previousTimestamp
+                        ? (std::min)(event.timestampUs - previousTimestamp, uint64_t{ 500000 })
+                        : 0;
+                    previousTimestamp = event.timestampUs;
+                    if (delayUs > 0 && waitFor(std::chrono::microseconds(delayUs))) return;
+                    std::lock_guard<std::mutex> lock(injectorMutex);
+                    if (injector.Inject(event.payload)) m_injectedEvents++;
+                }
+            };
+
+            for (const auto& step : definition.steps) {
+                if (cancelPlayback || !m_running || !m_connectionAlive) break;
+                switch (step.type) {
+                case MacroStepType::KeyChord:
+                    SendKeyChord(step.modifiers, step.keyCode);
+                    break;
+                case MacroStepType::MouseClick:
+                    positionCursor(anchorX, anchorY);
+                    if (step.parameter == 1) {
+                        SendMouseClick(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1);
+                    } else if (step.parameter == 2) {
+                        SendMouseClick(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 2);
+                    } else if (step.parameter == 3) {
+                        SendMouseClick(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 1);
+                    }
+                    break;
+                case MacroStepType::Delay:
+                    if (step.parameter > 0 && waitFor(std::chrono::milliseconds(step.parameter))) {
+                        break;
+                    }
+                    break;
+                case MacroStepType::PenPlayback:
+                    playPenEvents(LoadMacroFile(
+                        m_macroDirectory,
+                        std::to_string(step.parameter) + ".rdm"
+                    ));
+                    break;
+                }
+            }
+            std::lock_guard<std::mutex> lock(injectorMutex);
+            injector.Reset();
+            playbackActive = false;
+        });
     };
 
     while (m_running && m_connectionAlive) {
@@ -412,11 +548,22 @@ void PenInputReceiver::Run() {
         if (header.packet_type == PACKET_TYPE_PEN && payloadSize == sizeof(PenPayload)) {
             PenPayload pen{};
             std::memcpy(&pen, payload.data(), sizeof(pen));
-            stopPlayback();
+            if (playbackActive) {
+                const PlaybackPenDisposition disposition =
+                    ClassifyLivePenDuringPlayback(pen.action);
+                if (disposition == PlaybackPenDisposition::Suppress) continue;
+                stopPlayback();
+            }
             recorder.Observe(MonotonicTimeUs(), pen);
-            std::lock_guard<std::mutex> lock(injectorMutex);
-            if (injectionAvailable && injector.Inject(pen)) {
-                m_injectedEvents++;
+            if (inputMode == PointerInputMode::Mouse) {
+                injectMouse(pen);
+            } else {
+                PenPayload effectivePen = pen;
+                effectivePen.tool = ResolvePenTool(inputMode, pen.tool);
+                std::lock_guard<std::mutex> lock(injectorMutex);
+                if (injectionAvailable && injector.Inject(effectivePen)) {
+                    m_injectedEvents++;
+                }
             }
         } else if (header.packet_type == PACKET_TYPE_INPUT_COMMAND &&
             payloadSize == sizeof(InputCommandPayload)) {
@@ -450,8 +597,9 @@ void PenInputReceiver::Run() {
                 auto recorded = recorder.Stop();
                 if (!recorded.empty()) {
                     latestMacro = std::move(recorded);
-                    SaveMacro(m_macroDirectory, latestMacro);
-                    std::cout << "[Ink] Macro recording saved (" << latestMacro.size() << " events)" << std::endl;
+                    const uint32_t recordingId = SaveNewMacroRecording(m_macroDirectory, latestMacro);
+                    std::cout << "[Ink] Macro recording saved (" << latestMacro.size()
+                              << " events, id=" << recordingId << ")" << std::endl;
                 }
                 break;
             }
@@ -461,13 +609,13 @@ void PenInputReceiver::Run() {
             case INPUT_ACTION_SAVE_LAST_STROKE:
                 if (!recorder.LastStroke().empty()) {
                     latestMacro = recorder.LastStroke();
-                    SaveMacro(m_macroDirectory, latestMacro);
+                    SaveNewMacroRecording(m_macroDirectory, latestMacro);
                 }
                 break;
             case INPUT_ACTION_SAVE_LAST_TAP:
                 if (!recorder.LastTap().empty()) {
                     latestMacro = recorder.LastTap();
-                    SaveMacro(m_macroDirectory, latestMacro);
+                    SaveNewMacroRecording(m_macroDirectory, latestMacro);
                 }
                 break;
             case INPUT_ACTION_REPLAY_LAST_STROKE:
@@ -479,6 +627,41 @@ void PenInputReceiver::Run() {
             case INPUT_ACTION_REPLAY_LATEST:
                 startPlayback(PenMacroRecorder::Reanchor(latestMacro, anchorX, anchorY));
                 break;
+            case INPUT_ACTION_EXECUTE_MACRO: {
+                const uint32_t macroId = ntohl(command.parameter);
+                const MacroDefinition* definition = m_macroLibrary.Find(macroId);
+                if (definition != nullptr) startMacro(*definition, anchorX, anchorY);
+                break;
+            }
+            case INPUT_ACTION_TOGGLE_ERASER_MODE:
+                stopPlayback();
+                resetMouseInput();
+                {
+                    std::lock_guard<std::mutex> lock(injectorMutex);
+                    injector.Reset();
+                }
+                inputMode = inputMode == PointerInputMode::Eraser
+                    ? PointerInputMode::Pen
+                    : PointerInputMode::Eraser;
+                std::cout << "[Input] " << (inputMode == PointerInputMode::Eraser
+                    ? "Eraser mode enabled" : "Pen mode enabled") << std::endl;
+                break;
+            case INPUT_ACTION_ENTER_MOUSE_MODE:
+                stopPlayback();
+                resetMouseInput();
+                {
+                    std::lock_guard<std::mutex> lock(injectorMutex);
+                    injector.Reset();
+                }
+                inputMode = PointerInputMode::Mouse;
+                std::cout << "[Input] Mouse mode enabled" << std::endl;
+                break;
+            case INPUT_ACTION_EXIT_MOUSE_MODE:
+                stopPlayback();
+                resetMouseInput();
+                inputMode = PointerInputMode::Pen;
+                std::cout << "[Input] Mouse mode disabled" << std::endl;
+                break;
             default:
                 break;
             }
@@ -486,6 +669,7 @@ void PenInputReceiver::Run() {
     }
 
     stopPlayback();
+    resetMouseInput();
     std::lock_guard<std::mutex> lock(injectorMutex);
     injector.Reset();
 }

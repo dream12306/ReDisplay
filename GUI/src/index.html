@@ -18,7 +18,7 @@
                 <img src="../assets/icon.png" width="22" height="22" style="border-radius: 5px; display: block;" alt="ReDisplay">
             </div>
             <span class="app-title">ReDisplay</span>
-            <span class="version-tag">v1.5.0</span>
+            <span class="version-tag">v1.7.2</span>
             <div id="status-pill" class="status-badge status-idle">
                 <span class="badge-dot"></span>
                 <span id="status-text">待机就绪</span>
@@ -69,6 +69,14 @@
                 <button id="btn-reconfig-revert" class="banner-btn banner-btn-revert">还原 (<span id="reconfig-countdown">10</span>s)</button>
             </div>
         </div>
+
+        <nav class="app-tabs" aria-label="ReDisplay 功能页">
+            <button class="app-tab active" data-tab="stream">串流控制</button>
+            <button class="app-tab" data-tab="wheel">轮盘配置</button>
+            <button class="app-tab" data-tab="macros">宏操作库</button>
+        </nav>
+
+        <div id="tab-stream" class="tab-panel active">
 
         <!-- Telemetry Cards Hero Grid -->
         <section class="telemetry-grid">
@@ -284,6 +292,9 @@
             </section>
         </div>
 
+        </div>
+
+        <div id="tab-wheel" class="tab-panel">
         <section class="md3-card wheel-config-card">
             <div class="wheel-config-header">
                 <div class="card-title-row">
@@ -296,11 +307,75 @@
                     <button id="btn-wheel-save" class="md3-btn md3-btn-tonal">保存轮盘</button>
                 </div>
             </div>
-            <div class="wheel-editor-head">
-                <span>位置</span><span>显示名称</span><span>执行动作</span><span>组合键</span>
+            <div class="wheel-workspace">
+                <div>
+                    <div class="section-label">点击槽位进行编辑</div>
+                    <div id="wheel-editor" class="wheel-editor" aria-label="双环轮盘槽位"></div>
+                </div>
+                <div class="wheel-inspector">
+                    <div id="wheel-selected-position" class="inspector-title">内环 1</div>
+                    <label for="wheel-slot-label">显示名称</label>
+                    <input id="wheel-slot-label" class="wheel-slot-input" maxlength="24">
+                    <label for="wheel-slot-action">执行动作</label>
+                    <select id="wheel-slot-action" class="wheel-slot-select"></select>
+                    <div id="wheel-chord-group" class="inspector-field">
+                        <label for="wheel-slot-chord">组合键</label>
+                        <input id="wheel-slot-chord" class="wheel-slot-input" placeholder="如 Ctrl+Z">
+                    </div>
+                    <div id="wheel-macro-group" class="inspector-field hidden">
+                        <label for="wheel-slot-macro">宏操作</label>
+                        <select id="wheel-slot-macro" class="wheel-slot-select"></select>
+                    </div>
+                </div>
             </div>
-            <div id="wheel-editor" class="wheel-editor"></div>
         </section>
+        </div>
+
+        <div id="tab-macros" class="tab-panel">
+            <section class="md3-card macro-library-card">
+                <div class="macro-toolbar">
+                    <div class="card-title-row">
+                        <h2 class="card-title">宏操作库</h2>
+                        <span class="card-subtitle">录制与自定义 Windows 操作统一保存在电脑端，可绑定到主轮盘或从宏库子轮盘执行。</span>
+                    </div>
+                    <div class="wheel-config-actions">
+                        <span id="macro-save-status" class="wheel-save-status">尚未修改</span>
+                        <button id="btn-macro-refresh" class="md3-btn md3-btn-outlined">刷新录制</button>
+                        <button id="btn-macro-new" class="md3-btn md3-btn-outlined">新建宏</button>
+                        <button id="btn-macro-save" class="md3-btn md3-btn-tonal">保存宏库</button>
+                    </div>
+                </div>
+                <div class="macro-workspace">
+                    <aside class="macro-list-pane">
+                        <input id="macro-search" class="wheel-slot-input" placeholder="搜索宏…">
+                        <div id="macro-list" class="macro-list"></div>
+                    </aside>
+                    <div class="macro-detail-pane">
+                        <div id="macro-empty" class="macro-empty">选择一个宏，或新建自定义宏。</div>
+                        <div id="macro-editor" class="hidden">
+                            <div class="macro-editor-head">
+                                <input id="macro-name" class="macro-name-input" maxlength="24" placeholder="宏名称">
+                                <label class="favorite-toggle"><input id="macro-favorite" type="checkbox"> 收藏</label>
+                                <button id="btn-macro-delete" class="text-btn danger-text">删除</button>
+                            </div>
+                            <label for="macro-category">分类</label>
+                            <input id="macro-category" class="wheel-slot-input" maxlength="24" placeholder="未分类">
+                            <div class="macro-steps-head">
+                                <span>执行步骤</span>
+                                <select id="macro-add-step" class="wheel-slot-select compact-select">
+                                    <option value="">＋ 添加步骤</option>
+                                    <option value="keyChord">键盘组合键</option>
+                                    <option value="mouseClick">鼠标点击</option>
+                                    <option value="delay">等待</option>
+                                </select>
+                            </div>
+                            <div id="macro-steps" class="macro-steps"></div>
+                            <p class="macro-hint">笔操作录制会在按下笔上键开始、按下键结束后自动出现在这里。</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
 
         <!-- Bottom Actions Bar -->
         <section class="action-bar">

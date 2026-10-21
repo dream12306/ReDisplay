@@ -78,6 +78,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnWheelSave = document.getElementById('btn-wheel-save');
     const btnWheelReset = document.getElementById('btn-wheel-reset');
     const wheelSaveStatus = document.getElementById('wheel-save-status');
+    const appTabs = document.querySelectorAll('.app-tab');
+    const tabPanels = document.querySelectorAll('.tab-panel');
+    const wheelSelectedPosition = document.getElementById('wheel-selected-position');
+    const wheelSlotLabel = document.getElementById('wheel-slot-label');
+    const wheelSlotAction = document.getElementById('wheel-slot-action');
+    const wheelSlotChord = document.getElementById('wheel-slot-chord');
+    const wheelSlotMacro = document.getElementById('wheel-slot-macro');
+    const wheelChordGroup = document.getElementById('wheel-chord-group');
+    const wheelMacroGroup = document.getElementById('wheel-macro-group');
+    const macroSaveStatus = document.getElementById('macro-save-status');
+    const btnMacroNew = document.getElementById('btn-macro-new');
+    const btnMacroRefresh = document.getElementById('btn-macro-refresh');
+    const btnMacroSave = document.getElementById('btn-macro-save');
+    const btnMacroDelete = document.getElementById('btn-macro-delete');
+    const macroSearch = document.getElementById('macro-search');
+    const macroList = document.getElementById('macro-list');
+    const macroEmpty = document.getElementById('macro-empty');
+    const macroEditor = document.getElementById('macro-editor');
+    const macroName = document.getElementById('macro-name');
+    const macroCategory = document.getElementById('macro-category');
+    const macroFavorite = document.getElementById('macro-favorite');
+    const macroAddStep = document.getElementById('macro-add-step');
+    const macroSteps = document.getElementById('macro-steps');
 
     // App State
     let isStreaming = false;
@@ -93,6 +116,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let displaysList = [];
     let isClientInstalled = false;
     let wheelRevision = 1;
+    let wheelConfigState = null;
+    let selectedWheelIndex = 0;
+    let macroLibraryState = { version: 1, revision: 1, ignoredRecordingIds: [], items: [] };
+    let selectedMacroId = null;
 
     // Snapshot for safe revert & hot reconfig
     let savedConfig = {
@@ -940,81 +967,286 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    const wheelActionOptions = [
-        ['none', '空槽位'],
-        ['leftClick', '鼠标单击'],
-        ['doubleClick', '鼠标双击'],
-        ['keyChord', '键盘组合键'],
-        ['rightClick', '鼠标右键'],
-        ['recordingZone', '进入录制区'],
-        ['recordStart', '开始录制'],
-        ['recordStop', '结束并保存'],
-        ['recordCancel', '取消录制'],
-        ['saveLastStroke', '保存上次笔迹'],
-        ['saveLastTap', '保存上次点击'],
-        ['replayLastStroke', '重复上次笔迹'],
-        ['replayLastTap', '重复上次点击'],
-        ['replayLatest', '回放已保存操作']
-    ];
+    appTabs.forEach(tab => tab.addEventListener('click', () => {
+        appTabs.forEach(candidate => candidate.classList.toggle('active', candidate === tab));
+        tabPanels.forEach(panel => panel.classList.toggle('active', panel.id === `tab-${tab.dataset.tab}`));
+    }));
 
-    function renderWheelConfig(config) {
+    const wheelActionOptions = [
+        ['none', '空槽位'], ['leftClick', '鼠标单击'], ['doubleClick', '鼠标双击'],
+        ['rightClick', '鼠标右键'], ['keyChord', '键盘组合键'],
+        ['macroLibrary', '打开宏操作库'], ['executeMacro', '执行指定宏'],
+        ['toggleEraserMode', '切换橡皮擦模式'],
+        ['enterMouseMode', '进入鼠标模式'], ['exitMouseMode', '退出鼠标模式'],
+        ['recordingZone', '进入录制区'], ['recordStart', '开始录制'],
+        ['recordStop', '结束并保存'], ['recordCancel', '取消录制'],
+        ['saveLastStroke', '保存上次笔迹'],
+        ['replayLastStroke', '重复上次笔迹'],
+        ['replayLatest', '回放最近录制']
+    ];
+    wheelActionOptions.forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        wheelSlotAction.appendChild(option);
+    });
+
+    function updateWheelInspector() {
+        if (!wheelConfigState) return;
+        const slot = wheelConfigState.slots[selectedWheelIndex];
+        wheelSelectedPosition.textContent = `${selectedWheelIndex < 8 ? '内环' : '外环'} ${selectedWheelIndex % 8 + 1}`;
+        wheelSlotLabel.value = slot.label || '';
+        wheelSlotAction.value = slot.action || 'none';
+        wheelSlotChord.value = slot.chord || '';
+        wheelChordGroup.classList.toggle('hidden', slot.action !== 'keyChord');
+        wheelMacroGroup.classList.toggle('hidden', slot.action !== 'executeMacro');
+        wheelSlotMacro.innerHTML = '';
+        macroLibraryState.items.forEach(item => {
+            const option = document.createElement('option');
+            option.value = String(item.id);
+            option.textContent = item.name;
+            wheelSlotMacro.appendChild(option);
+        });
+        wheelSlotMacro.value = String(slot.macroId || macroLibraryState.items[0]?.id || '');
+    }
+
+    function renderWheelConfig(config = wheelConfigState) {
         if (!config || !Array.isArray(config.slots)) return;
+        wheelConfigState = JSON.parse(JSON.stringify(config));
         wheelRevision = config.revision || 1;
         wheelEditor.innerHTML = '';
-        config.slots.forEach((slot, index) => {
-            const row = document.createElement('div');
-            row.className = 'wheel-slot-row';
-            row.dataset.index = String(index);
-
-            const position = document.createElement('span');
-            position.className = 'wheel-slot-position';
-            position.textContent = `${index < 8 ? '内环' : '外环'} ${index % 8 + 1}`;
-
-            const label = document.createElement('input');
-            label.className = 'wheel-slot-input wheel-label';
-            label.maxLength = 24;
-            label.value = slot.label || '';
-            label.setAttribute('aria-label', `${position.textContent}名称`);
-
-            const action = document.createElement('select');
-            action.className = 'wheel-slot-select wheel-action';
-            wheelActionOptions.forEach(([value, text]) => {
-                const option = document.createElement('option');
-                option.value = value;
-                option.textContent = text;
-                action.appendChild(option);
+        wheelConfigState.slots.forEach((slot, index) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = `wheel-slot-button${index === selectedWheelIndex ? ' active' : ''}`;
+            button.innerHTML = `<small>${index < 8 ? '内环' : '外环'} ${index % 8 + 1}</small><span></span>`;
+            button.querySelector('span').textContent = slot.label || '空';
+            button.addEventListener('click', () => {
+                selectedWheelIndex = index;
+                renderWheelConfig(wheelConfigState);
             });
-            action.value = slot.action || 'none';
+            wheelEditor.appendChild(button);
+        });
+        updateWheelInspector();
+    }
 
-            const chord = document.createElement('input');
-            chord.className = 'wheel-slot-input wheel-chord';
-            chord.placeholder = '如 Ctrl+Z';
-            chord.value = slot.chord || '';
-            chord.disabled = action.value !== 'keyChord';
-            action.addEventListener('change', () => {
-                chord.disabled = action.value !== 'keyChord';
-                if (!chord.disabled && !chord.value) chord.focus();
+    function updateSelectedWheelSlot() {
+        if (!wheelConfigState) return;
+        const slot = wheelConfigState.slots[selectedWheelIndex];
+        slot.label = wheelSlotLabel.value.trim();
+        slot.action = wheelSlotAction.value;
+        slot.chord = wheelSlotChord.value.trim();
+        if (slot.action === 'executeMacro') slot.macroId = Number(wheelSlotMacro.value) >>> 0;
+        renderWheelConfig(wheelConfigState);
+        wheelSaveStatus.textContent = '有未保存更改';
+    }
+    wheelSlotLabel.addEventListener('change', updateSelectedWheelSlot);
+    wheelSlotChord.addEventListener('change', updateSelectedWheelSlot);
+    wheelSlotMacro.addEventListener('change', updateSelectedWheelSlot);
+    wheelSlotAction.addEventListener('change', () => {
+        if (wheelSlotAction.value === 'executeMacro' && macroLibraryState.items.length === 0) {
+            wheelSaveStatus.textContent = '请先在宏操作库中创建宏';
+            wheelSlotAction.value = 'macroLibrary';
+        }
+        updateSelectedWheelSlot();
+    });
+
+    function collectWheelConfig() {
+        return { version: 2, revision: wheelRevision, slots: wheelConfigState.slots };
+    }
+
+    function selectedMacro() {
+        return macroLibraryState.items.find(item => item.id === selectedMacroId) || null;
+    }
+
+    function renderMacroList() {
+        const query = macroSearch.value.trim().toLowerCase();
+        macroList.innerHTML = '';
+        const items = [...macroLibraryState.items]
+            .filter(item => !query || item.name.toLowerCase().includes(query) || item.category.toLowerCase().includes(query))
+            .sort((a, b) => Number(b.favorite) - Number(a.favorite) || b.updatedAt - a.updatedAt);
+        items.forEach(item => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = `macro-list-item${item.id === selectedMacroId ? ' active' : ''}`;
+            const title = document.createElement('span');
+            title.textContent = `${item.favorite ? '★ ' : ''}${item.name}`;
+            const subtitle = document.createElement('small');
+            subtitle.textContent = `${item.category} · ${item.steps.length} 步`;
+            button.append(title, subtitle);
+            button.addEventListener('click', () => {
+                selectedMacroId = item.id;
+                renderMacroList();
+                renderMacroEditor();
             });
-
-            row.append(position, label, action, chord);
-            wheelEditor.appendChild(row);
+            macroList.appendChild(button);
         });
     }
 
-    function collectWheelConfig() {
-        const slots = Array.from(wheelEditor.querySelectorAll('.wheel-slot-row')).map(row => ({
-            label: row.querySelector('.wheel-label').value.trim(),
-            action: row.querySelector('.wheel-action').value,
-            chord: row.querySelector('.wheel-chord').value.trim()
-        }));
-        return { version: 2, revision: wheelRevision, slots };
+    function renderMacroEditor() {
+        const item = selectedMacro();
+        macroEmpty.classList.toggle('hidden', !!item);
+        macroEditor.classList.toggle('hidden', !item);
+        if (!item) return;
+        macroName.value = item.name;
+        macroCategory.value = item.category;
+        macroFavorite.checked = !!item.favorite;
+        macroSteps.innerHTML = '';
+        item.steps.forEach((step, index) => {
+            const row = document.createElement('div');
+            row.className = 'macro-step-row';
+            const number = document.createElement('span');
+            number.className = 'macro-step-index';
+            number.textContent = String(index + 1);
+            const type = document.createElement('span');
+            type.textContent = { keyChord: '键盘组合键', mouseClick: '鼠标点击', delay: '等待', penPlayback: '笔操作录制' }[step.type];
+            let control;
+            if (step.type === 'keyChord') {
+                control = document.createElement('input');
+                control.className = 'wheel-slot-input';
+                control.value = step.chord;
+                control.addEventListener('change', () => { step.chord = control.value.trim(); markMacroDirty(); });
+            } else if (step.type === 'mouseClick') {
+                control = document.createElement('select');
+                control.className = 'wheel-slot-select';
+                [['left', '单击'], ['double', '双击'], ['right', '右键']].forEach(([value, label]) => {
+                    control.add(new Option(label, value));
+                });
+                control.value = step.button;
+                control.addEventListener('change', () => { step.button = control.value; markMacroDirty(); });
+            } else if (step.type === 'delay') {
+                control = document.createElement('input');
+                control.type = 'number';
+                control.min = '0';
+                control.max = '10000';
+                control.className = 'wheel-slot-input';
+                control.value = String(step.ms);
+                control.addEventListener('change', () => { step.ms = Number(control.value); markMacroDirty(); });
+            } else {
+                control = document.createElement('span');
+                control.textContent = `录制 #${step.recordingId}`;
+            }
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'macro-step-remove';
+            remove.textContent = '×';
+            remove.title = '删除步骤';
+            remove.addEventListener('click', () => {
+                if (item.steps.length <= 1) return;
+                item.steps.splice(index, 1);
+                item.updatedAt = Date.now();
+                renderMacroEditor();
+                renderMacroList();
+                markMacroDirty();
+            });
+            row.append(number, type, control, remove);
+            macroSteps.appendChild(row);
+        });
     }
 
-    async function loadWheelConfigEditor() {
+    function markMacroDirty() { macroSaveStatus.textContent = '有未保存更改'; }
+    macroSearch.addEventListener('input', renderMacroList);
+    macroName.addEventListener('input', () => {
+        const item = selectedMacro();
+        if (!item) return;
+        item.name = macroName.value;
+        item.updatedAt = Date.now();
+        renderMacroList();
+        markMacroDirty();
+    });
+    macroCategory.addEventListener('input', () => {
+        const item = selectedMacro();
+        if (!item) return;
+        item.category = macroCategory.value;
+        item.updatedAt = Date.now();
+        markMacroDirty();
+    });
+    macroFavorite.addEventListener('change', () => {
+        const item = selectedMacro();
+        if (!item) return;
+        item.favorite = macroFavorite.checked;
+        item.updatedAt = Date.now();
+        renderMacroList();
+        markMacroDirty();
+    });
+    macroAddStep.addEventListener('change', () => {
+        const item = selectedMacro();
+        const type = macroAddStep.value;
+        macroAddStep.value = '';
+        if (!item || !type) return;
+        if (type === 'keyChord') item.steps.push({ type, chord: 'Ctrl+C' });
+        else if (type === 'mouseClick') item.steps.push({ type, button: 'left' });
+        else if (type === 'delay') item.steps.push({ type, ms: 100 });
+        item.updatedAt = Date.now();
+        renderMacroEditor();
+        renderMacroList();
+        markMacroDirty();
+    });
+    btnMacroNew.addEventListener('click', () => {
+        const used = new Set(macroLibraryState.items.map(item => item.id));
+        let id = Date.now() >>> 0 || 1;
+        while (used.has(id)) id = (id + 1) >>> 0 || 1;
+        const item = { id, name: '新建宏', category: '自定义操作', favorite: false,
+            createdAt: Date.now(), updatedAt: Date.now(), steps: [{ type: 'keyChord', chord: 'Ctrl+C' }] };
+        macroLibraryState.items.push(item);
+        selectedMacroId = id;
+        renderMacroList();
+        renderMacroEditor();
+        markMacroDirty();
+    });
+    btnMacroRefresh.addEventListener('click', async () => {
+        btnMacroRefresh.disabled = true;
         try {
-            renderWheelConfig(await window.api.getWheelConfig());
+            macroLibraryState = await window.api.getMacroLibrary();
+            selectedMacroId = macroLibraryState.items.some(item => item.id === selectedMacroId)
+                ? selectedMacroId : (macroLibraryState.items[0]?.id || null);
+            renderMacroList();
+            renderMacroEditor();
+            updateWheelInspector();
+            macroSaveStatus.textContent = '已刷新电脑端录制';
+        } catch (error) {
+            macroSaveStatus.textContent = `刷新失败: ${error.message}`;
+        } finally {
+            btnMacroRefresh.disabled = false;
+        }
+    });
+    btnMacroDelete.addEventListener('click', () => {
+        if (selectedMacroId == null) return;
+        const deleting = selectedMacro();
+        macroLibraryState.ignoredRecordingIds ||= [];
+        for (const step of deleting?.steps || []) {
+            if (step.type === 'penPlayback' && !macroLibraryState.ignoredRecordingIds.includes(step.recordingId)) {
+                macroLibraryState.ignoredRecordingIds.push(step.recordingId);
+            }
+        }
+        macroLibraryState.items = macroLibraryState.items.filter(item => item.id !== selectedMacroId);
+        for (const slot of wheelConfigState?.slots || []) {
+            if (slot.action === 'executeMacro' && slot.macroId === selectedMacroId) {
+                slot.action = 'macroLibrary';
+                slot.label = '宏操作库';
+                delete slot.macroId;
+                wheelSaveStatus.textContent = '轮盘引用已改为宏操作库，请保存轮盘';
+            }
+        }
+        selectedMacroId = macroLibraryState.items[0]?.id || null;
+        renderMacroList();
+        renderMacroEditor();
+        markMacroDirty();
+    });
+
+    async function loadEditors() {
+        try {
+            const [library, config] = await Promise.all([
+                window.api.getMacroLibrary(), window.api.getWheelConfig()
+            ]);
+            macroLibraryState = library;
+            selectedMacroId = library.items[0]?.id || null;
+            renderMacroList();
+            renderMacroEditor();
+            renderWheelConfig(config);
         } catch (error) {
             wheelSaveStatus.textContent = `加载失败: ${error.message}`;
+            macroSaveStatus.textContent = `加载失败: ${error.message}`;
         }
     }
 
@@ -1046,8 +1278,26 @@ document.addEventListener('DOMContentLoaded', () => {
         appendLog('轮盘已恢复默认配置。');
     });
 
+    btnMacroSave.addEventListener('click', async () => {
+        btnMacroSave.disabled = true;
+        macroSaveStatus.textContent = '正在保存…';
+        const result = await window.api.saveMacroLibrary(macroLibraryState);
+        btnMacroSave.disabled = false;
+        if (!result.success) {
+            macroSaveStatus.textContent = result.error || '保存失败';
+            appendLog(`宏操作库保存失败: ${result.error}`, 'error');
+            return;
+        }
+        macroLibraryState = result.library;
+        renderMacroList();
+        renderMacroEditor();
+        updateWheelInspector();
+        macroSaveStatus.textContent = result.restarted ? '已保存并重启串流' : '已保存';
+        appendLog('宏操作库已保存。');
+    });
+
     // Initial load
-    loadWheelConfigEditor();
+    loadEditors();
     loadGpuInfo();
     loadDevices();
     loadDisplays();

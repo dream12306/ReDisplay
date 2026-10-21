@@ -12,7 +12,8 @@ enum PacketType : uint8_t {
     PACKET_TYPE_PONG = 4,
     PACKET_TYPE_PEN = 5,
     PACKET_TYPE_WHEEL_CONFIG = 6,
-    PACKET_TYPE_INPUT_COMMAND = 7
+    PACKET_TYPE_INPUT_COMMAND = 7,
+    PACKET_TYPE_MACRO_CATALOG = 8
 };
 
 enum PacketFlags : uint8_t {
@@ -71,7 +72,14 @@ enum InputAction : uint8_t {
     INPUT_ACTION_REPLAY_LATEST = 11,
     INPUT_ACTION_BACK = 12, // Android-local navigation action.
     INPUT_ACTION_LEFT_CLICK = 13,
-    INPUT_ACTION_DOUBLE_CLICK = 14
+    INPUT_ACTION_DOUBLE_CLICK = 14,
+    INPUT_ACTION_MACRO_LIBRARY = 15, // Android-local navigation action.
+    INPUT_ACTION_EXECUTE_MACRO = 16,
+    INPUT_ACTION_MACRO_PAGE_PREVIOUS = 17, // Android-local navigation action.
+    INPUT_ACTION_MACRO_PAGE_NEXT = 18, // Android-local navigation action.
+    INPUT_ACTION_TOGGLE_ERASER_MODE = 19,
+    INPUT_ACTION_ENTER_MOUSE_MODE = 20,
+    INPUT_ACTION_EXIT_MOUSE_MODE = 21
 };
 
 enum InputModifiers : uint8_t {
@@ -134,10 +142,25 @@ struct WheelSlotPayload {
     char label[32];
 };
 
+constexpr uint16_t MACRO_CATALOG_SCHEMA_VERSION = 1;
+
+struct MacroCatalogHeader {
+    uint16_t schema_version;
+    uint16_t item_count;
+    uint32_t revision;
+};
+
+struct MacroCatalogItemPayload {
+    uint32_t id;
+    char label[32];
+};
+
 static_assert(sizeof(PacketHeader) == 20, "PacketHeader wire size changed");
 static_assert(sizeof(PenPayload) == 20, "PenPayload wire size changed");
 static_assert(sizeof(InputCommandPayload) == 20, "InputCommandPayload wire size changed");
 static_assert(sizeof(WheelConfigHeader) == 8, "WheelConfigHeader wire size changed");
 static_assert(sizeof(WheelSlotPayload) == 40, "WheelSlotPayload wire size changed");
+static_assert(sizeof(MacroCatalogHeader) == 8, "MacroCatalogHeader wire size changed");
+static_assert(sizeof(MacroCatalogItemPayload) == 36, "MacroCatalogItemPayload wire size changed");
 
 #pragma pack(pop)

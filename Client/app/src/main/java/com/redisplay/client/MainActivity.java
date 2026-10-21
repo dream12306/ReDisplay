@@ -48,7 +48,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     private float lastPenParentX = 0;
     private float lastPenParentY = 0;
     private boolean macroRecording = false;
+    private boolean mouseMode = false;
+    private boolean eraserMode = false;
     private final WheelInteractionState wheelInteractionState = new WheelInteractionState();
+    private final WheelGestureGuard wheelGestureGuard = new WheelGestureGuard();
     private final float[] penCoordinates = new float[2];
 
     private final ServiceConnection serviceConn = new ServiceConnection() {
@@ -201,6 +204,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
 
     private boolean handlePenMotionEvent(MotionEvent event) {
         int maskedAction = event.getActionMasked();
+        boolean terminalAction = maskedAction == MotionEvent.ACTION_UP
+                || maskedAction == MotionEvent.ACTION_POINTER_UP
+                || maskedAction == MotionEvent.ACTION_CANCEL;
+        if (wheelGestureGuard.shouldConsume(terminalAction)) return true;
         int pointerIndex = Math.min(event.getActionIndex(), Math.max(0, event.getPointerCount() - 1));
         lastPenParentX = event.getX(pointerIndex);
         lastPenParentY = event.getY(pointerIndex);
@@ -209,7 +216,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
             wheelOverlay.updateSelection(lastPenParentX, lastPenParentY);
             if (maskedAction == MotionEvent.ACTION_DOWN
                     || maskedAction == MotionEvent.ACTION_POINTER_DOWN) {
-                handleWheelTap();
+                handleWheelTap(true);
             }
             return true;
         }
@@ -289,18 +296,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         wheelOverlay.updateSelection(event.getX(pointerIndex), event.getY(pointerIndex));
         int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
-            handleWheelTap();
+            handleWheelTap(false);
         }
         return true;
     }
 
-    private void handleWheelTap() {
+    private void handleWheelTap(boolean stylusGesture) {
         WheelInteractionState.Result result = wheelInteractionState.onWheelTap(
                 wheelOverlay.hasSelection()
         );
         if (result == WheelInteractionState.Result.DISMISS_WHEEL) {
+            if (stylusGesture) wheelGestureGuard.onSelectionCommitted();
             wheelOverlay.dismiss();
         } else if (result == WheelInteractionState.Result.EXECUTE_SELECTION) {
+            if (stylusGesture) wheelGestureGuard.onSelectionCommitted();
             executeWheelSelection(wheelOverlay.commitSelection());
         }
     }
@@ -387,6 +396,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         } else if (slot.action == NetworkServer.INPUT_ACTION_RECORD_CANCEL) {
             macroRecording = false;
             showTemporaryMessage("已取消本次录制");
+        } else if (slot.action == NetworkServer.INPUT_ACTION_ENTER_MOUSE_MODE) {
+            mouseMode = true;
+            eraserMode = false;
+            showTemporaryMessage("鼠标模式：悬停移动 · 落笔拖动 · 轻点单击");
+        } else if (slot.action == NetworkServer.INPUT_ACTION_EXIT_MOUSE_MODE) {
+            mouseMode = false;
+            eraserMode = false;
+            showTemporaryMessage("已退出鼠标模式，恢复手写笔");
+        } else if (slot.action == NetworkServer.INPUT_ACTION_TOGGLE_ERASER_MODE) {
+            eraserMode = !eraserMode;
+            mouseMode = false;
+            showTemporaryMessage(eraserMode ? "已进入橡皮擦模式" : "已退出橡皮擦模式");
         } else if (slot.label != null && !slot.label.isEmpty()) {
             showTemporaryMessage("已执行: " + slot.label);
         }
@@ -594,7 +615,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     public void onDisconnected() {
         handler.post(() -> {
             macroRecording = false;
+            mouseMode = false;
+            eraserMode = false;
             wheelInteractionState.reset();
+            wheelGestureGuard.reset();
             if (wheelOverlay != null) wheelOverlay.dismiss();
             statsOverlay.setTextColor(Color.GREEN);
             statsOverlay.setText("主机已断开，等待重新连接...\n端口: 27183");
@@ -637,6 +661,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         handler.post(() -> {
             wheelOverlay.setConfig(config);
             Log.i(TAG, "Wheel config applied, revision=" + config.revision);
+        });
+    }
+
+    @Override
+    public void onMacroCatalog(NetworkServer.MacroCatalog catalog) {
+        handler.post(() -> {
+            wheelOverlay.setMacroCatalog(catalog);
+            Log.i(TAG, "Macro catalog applied, revision=" + catalog.revision);
         });
     }
 

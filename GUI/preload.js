@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('api', {
     getWheelConfig: () => ipcRenderer.invoke('get-wheel-config'),
     saveWheelConfig: (config) => ipcRenderer.invoke('save-wheel-config', config),
     resetWheelConfig: () => ipcRenderer.invoke('reset-wheel-config'),
+    getMacroLibrary: () => ipcRenderer.invoke('get-macro-library'),
+    saveMacroLibrary: (library) => ipcRenderer.invoke('save-macro-library', library),
 
     // Detection & Hardware
     getDevices: () => ipcRenderer.invoke('get-devices'),

@@ -19,6 +19,7 @@
 #include "protocol.h"
 #include "adb.h"
 #include "display_manager.h"
+#include "macro_library.h"
 #include "encoder.h"
 #include "capture.h"
 #include "bounded_frame_queue.h"
@@ -178,6 +179,7 @@ int main(int argc, char* argv[]) {
     std::string bufferMode = "lowlatency";
     std::string wheelConfigPath;
     std::string macroDirectory;
+    std::string macroLibraryPath;
     bool isGui = false;
 
     // Check for helper commands first
@@ -249,6 +251,8 @@ int main(int argc, char* argv[]) {
             wheelConfigPath = argv[++i];
         } else if (arg == "--macro-dir" && i + 1 < argc) {
             macroDirectory = argv[++i];
+        } else if (arg == "--macro-library" && i + 1 < argc) {
+            macroLibraryPath = argv[++i];
         } else if (i == 1 && arg[0] != '-') {
             prefDisplayIdx = atoi(argv[1]);
         } else if (i == 2 && arg[0] != '-') {
@@ -284,6 +288,12 @@ int main(int argc, char* argv[]) {
     );
     if (!wheelConfigPath.empty() && !loadedWheelConfig) {
         std::cerr << "[Wheel] Invalid or missing config; using safe defaults." << std::endl;
+    }
+    bool loadedMacroLibrary = false;
+    const MacroLibrary macroLibrary = LoadMacroLibrary(macroLibraryPath, &loadedMacroLibrary);
+    const std::vector<uint8_t> macroCatalogPayload = BuildMacroCatalogPayload(macroLibrary);
+    if (!macroLibraryPath.empty() && !loadedMacroLibrary) {
+        std::cerr << "[Macro] Invalid or missing library; using an empty library." << std::endl;
     }
 
     // Initialize Winsock
@@ -492,6 +502,16 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        PacketHeader macroCatalogHeader{};
+        macroCatalogHeader.magic = htonl(REDISPLAY_MAGIC);
+        macroCatalogHeader.packet_type = PACKET_TYPE_MACRO_CATALOG;
+        macroCatalogHeader.payload_size = htonl(static_cast<uint32_t>(macroCatalogPayload.size()));
+        if (!SendAll(sock, &macroCatalogHeader, sizeof(macroCatalogHeader)) ||
+            !SendAll(sock, macroCatalogPayload.data(), macroCatalogPayload.size())) {
+            closesocket(sock);
+            continue;
+        }
+
         // Create D3D11 Device
         ID3D11Device* pD3DDevice = nullptr;
         ID3D11DeviceContext* pD3DContext = nullptr;
@@ -550,7 +570,8 @@ int main(int argc, char* argv[]) {
             disp.rect.top,
             targetWidth,
             targetHeight,
-            macroDirectory
+            macroDirectory,
+            macroLibrary
         );
         penInputReceiver.Start();
 

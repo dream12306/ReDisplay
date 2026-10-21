@@ -22,6 +22,7 @@ public class NetworkServer implements Runnable {
     public static final int PACKET_TYPE_PEN = 5;
     public static final int PACKET_TYPE_WHEEL_CONFIG = 6;
     public static final int PACKET_TYPE_INPUT_COMMAND = 7;
+    public static final int PACKET_TYPE_MACRO_CATALOG = 8;
     public static final int PEN_PAYLOAD_SIZE = 20;
     public static final int INPUT_COMMAND_PAYLOAD_SIZE = 20;
 
@@ -40,6 +41,13 @@ public class NetworkServer implements Runnable {
     public static final int INPUT_ACTION_BACK = 12;
     public static final int INPUT_ACTION_LEFT_CLICK = 13;
     public static final int INPUT_ACTION_DOUBLE_CLICK = 14;
+    public static final int INPUT_ACTION_MACRO_LIBRARY = 15;
+    public static final int INPUT_ACTION_EXECUTE_MACRO = 16;
+    public static final int INPUT_ACTION_MACRO_PAGE_PREVIOUS = 17;
+    public static final int INPUT_ACTION_MACRO_PAGE_NEXT = 18;
+    public static final int INPUT_ACTION_TOGGLE_ERASER_MODE = 19;
+    public static final int INPUT_ACTION_ENTER_MOUSE_MODE = 20;
+    public static final int INPUT_ACTION_EXIT_MOUSE_MODE = 21;
 
     public static final int PEN_ACTION_HOVER_ENTER = 1;
     public static final int PEN_ACTION_HOVER_MOVE = 2;
@@ -60,6 +68,7 @@ public class NetworkServer implements Runnable {
         void onResolutionChanged(int width, int height, int fps);
         void onStatsUpdate(float fps, int bitrateKbps);
         void onWheelConfig(WheelConfig config);
+        void onMacroCatalog(MacroCatalog catalog);
     }
 
     public static final class WheelSlot {
@@ -85,6 +94,16 @@ public class NetworkServer implements Runnable {
         WheelConfig(long revision, List<WheelSlot> slots) {
             this.revision = revision;
             this.slots = slots;
+        }
+    }
+
+    public static final class MacroCatalog {
+        public final long revision;
+        public final List<WheelSlot> items;
+
+        MacroCatalog(long revision, List<WheelSlot> items) {
+            this.revision = revision;
+            this.items = items;
         }
     }
 
@@ -289,6 +308,15 @@ public class NetworkServer implements Runnable {
                     } else {
                         Log.w(TAG, "Rejected invalid wheel config payload, bytes=" + payloadSize);
                     }
+                } else if (packetType == PACKET_TYPE_MACRO_CATALOG) {
+                    MacroCatalog catalog = parseMacroCatalog(buffer, payloadSize);
+                    if (catalog != null) {
+                        Log.i(TAG, "Macro catalog received: revision=" + catalog.revision
+                                + ", items=" + catalog.items.size());
+                        if (listener != null) listener.onMacroCatalog(catalog);
+                    } else {
+                        Log.w(TAG, "Rejected invalid macro catalog payload, bytes=" + payloadSize);
+                    }
                 }
 
                 // Periodic stats update
@@ -339,6 +367,26 @@ public class NetworkServer implements Runnable {
             slots.add(new WheelSlot(action, modifiers, keyCode, parameter, label));
         }
         return new WheelConfig(revision, slots);
+    }
+
+    private static MacroCatalog parseMacroCatalog(byte[] buffer, int payloadSize) {
+        final int headerSize = 8;
+        final int itemSize = 36;
+        if (payloadSize < headerSize || readUnsignedShort(buffer, 0) != 1) return null;
+        int itemCount = readUnsignedShort(buffer, 2);
+        if (itemCount > 256 || payloadSize != headerSize + itemSize * itemCount) return null;
+        long revision = readUnsignedInt(buffer, 4);
+        ArrayList<WheelSlot> items = new ArrayList<>(itemCount);
+        for (int index = 0; index < itemCount; index++) {
+            int offset = headerSize + index * itemSize;
+            long id = readUnsignedInt(buffer, offset);
+            if (id == 0) return null;
+            int labelLength = 0;
+            while (labelLength < 32 && buffer[offset + 4 + labelLength] != 0) labelLength++;
+            String label = new String(buffer, offset + 4, labelLength, StandardCharsets.UTF_8);
+            items.add(new WheelSlot(INPUT_ACTION_EXECUTE_MACRO, 0, 0, id, label));
+        }
+        return new MacroCatalog(revision, items);
     }
 
     private static int readUnsignedShort(byte[] bytes, int offset) {

@@ -1,12 +1,13 @@
 {
   "name": "redisplay-gui",
-  "version": "1.5.0",
+  "version": "1.7.2",
   "description": "Ultra-Low Latency Wired Secondary Display System",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
     "start": "electron .",
-    "build:win": "electron-builder --win portable --x64"
+    "test:package": "node tests/packaging.test.js",
+    "build:win": "npm run test:package && electron-builder --win portable --x64"
   },
   "keywords": [
     "redisplay",
@@ -34,6 +35,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "lib/**/*",
       "src/**/*",
       "assets/**/*",
       "package.json"
@@ -79,6 +81,9 @@
       "icon": "assets/icon.ico",
       "executableName": "ReDisplay",
       "artifactName": "ReDisplay.${ext}"
+    },
+    "portable": {
+      "unpackDirName": true
     }
   }
 }

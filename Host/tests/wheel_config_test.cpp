@@ -16,8 +16,10 @@ int main() {
     assert(slots[0].action == INPUT_ACTION_LEFT_CLICK);
     assert(slots[1].action == INPUT_ACTION_DOUBLE_CLICK);
     assert(slots[2].action == INPUT_ACTION_RIGHT_CLICK);
-    assert(slots[8].action == INPUT_ACTION_KEY_CHORD);
-    assert(ntohs(slots[8].key_code) == 'B');
+    assert(slots[8].action == INPUT_ACTION_MACRO_LIBRARY);
+    assert(slots[9].action == INPUT_ACTION_TOGGLE_ERASER_MODE);
+    assert(slots[12].action == INPUT_ACTION_ENTER_MOUSE_MODE);
+    assert(slots[13].action == INPUT_ACTION_EXIT_MOUSE_MODE);
     assert(slots[14].action == INPUT_ACTION_RECORDING_ZONE);
 
     auto badVersion = payload;

@@ -15,7 +15,7 @@ constexpr size_t kPayloadSize = sizeof(WheelConfigHeader) +
     WHEEL_SLOT_COUNT * sizeof(WheelSlotPayload);
 
 bool IsValidAction(uint8_t action) {
-    return action <= INPUT_ACTION_DOUBLE_CLICK;
+    return action <= INPUT_ACTION_EXIT_MOUSE_MODE;
 }
 
 void CopyLabel(char (&target)[32], const char* source) {
@@ -88,14 +88,14 @@ std::vector<uint8_t> BuildDefaultWheelConfigPayload() {
         MakeSlot(INPUT_ACTION_KEY_CHORD, "Paste", INPUT_MODIFIER_CTRL, 'V'),
         MakeSlot(INPUT_ACTION_KEY_CHORD, "Undo", INPUT_MODIFIER_CTRL, 'Z'),
         MakeSlot(INPUT_ACTION_KEY_CHORD, "Redo", INPUT_MODIFIER_CTRL, 'Y'),
-        MakeSlot(INPUT_ACTION_KEY_CHORD, "Pen", INPUT_MODIFIER_NONE, 'B'),
-        MakeSlot(INPUT_ACTION_KEY_CHORD, "Eraser", INPUT_MODIFIER_NONE, 'E'),
+        MakeSlot(INPUT_ACTION_MACRO_LIBRARY, "Macro library"),
+        MakeSlot(INPUT_ACTION_TOGGLE_ERASER_MODE, "Eraser mode"),
         MakeSlot(INPUT_ACTION_SAVE_LAST_STROKE, "Save stroke"),
         MakeSlot(INPUT_ACTION_REPLAY_LAST_STROKE, "Repeat stroke"),
-        MakeSlot(INPUT_ACTION_SAVE_LAST_TAP, "Save tap"),
-        MakeSlot(INPUT_ACTION_REPLAY_LAST_TAP, "Repeat tap"),
+        MakeSlot(INPUT_ACTION_ENTER_MOUSE_MODE, "Mouse mode"),
+        MakeSlot(INPUT_ACTION_EXIT_MOUSE_MODE, "Exit mouse"),
         MakeSlot(INPUT_ACTION_RECORDING_ZONE, "Recording"),
-        MakeSlot(INPUT_ACTION_REPLAY_LATEST, "Replay saved"),
+        MakeSlot(INPUT_ACTION_REPLAY_LATEST, "Latest recording"),
     };
 
     std::vector<uint8_t> payload(kPayloadSize);

@@ -3,6 +3,7 @@ const path = require('path');
 const { spawn, execFile, exec, execSync } = require('child_process');
 const readline = require('readline');
 const fs = require('fs');
+const { resolveHostExePath } = require('./lib/runtime-paths');
 
 let mainWindow = null;
 let tray = null;
@@ -23,7 +24,7 @@ let activeStreamDeviceName = '';
 let activeStreamSerial = '';
 let hasShownTrayTip = false;
 let lastTrayUpdateTime = 0;
-const PACKAGED_CLIENT_VERSION_CODE = 6;
+const PACKAGED_CLIENT_VERSION_CODE = 8;
 
 const WHEEL_ACTIONS = Object.freeze({
     none: 0,
@@ -39,7 +40,12 @@ const WHEEL_ACTIONS = Object.freeze({
     replayLastTap: 10,
     replayLatest: 11,
     leftClick: 13,
-    doubleClick: 14
+    doubleClick: 14,
+    macroLibrary: 15,
+    executeMacro: 16,
+    toggleEraserMode: 19,
+    enterMouseMode: 20,
+    exitMouseMode: 21
 });
 
 function defaultWheelConfig() {
@@ -55,14 +61,14 @@ function defaultWheelConfig() {
             { label: '粘贴', action: 'keyChord', chord: 'Ctrl+V' },
             { label: '撤销', action: 'keyChord', chord: 'Ctrl+Z' },
             { label: '重做', action: 'keyChord', chord: 'Ctrl+Y' },
-            { label: '画笔', action: 'keyChord', chord: 'B' },
-            { label: '橡皮擦', action: 'keyChord', chord: 'E' },
+            { label: '宏操作库', action: 'macroLibrary' },
+            { label: '橡皮擦模式', action: 'toggleEraserMode' },
             { label: '保存笔迹', action: 'saveLastStroke' },
             { label: '重复笔迹', action: 'replayLastStroke' },
-            { label: '保存点击', action: 'saveLastTap' },
-            { label: '重复点击', action: 'replayLastTap' },
+            { label: '进入鼠标模式', action: 'enterMouseMode' },
+            { label: '退出鼠标模式', action: 'exitMouseMode' },
             { label: '录制区', action: 'recordingZone' },
-            { label: '回放保存', action: 'replayLatest' },
+            { label: '最近录制', action: 'replayLatest' },
         ]
     };
 }
@@ -73,7 +79,9 @@ function wheelPaths() {
         root,
         json: path.join(root, 'wheel-config.json'),
         binary: path.join(root, 'wheel-config.bin'),
-        macros: path.join(root, 'macros')
+        macros: path.join(root, 'macros'),
+        macroLibraryJson: path.join(root, 'macro-library.json'),
+        macroLibraryBinary: path.join(root, 'macro-library.bin')
     };
 }
 
@@ -117,6 +125,10 @@ function normalizeWheelConfig(config) {
             if (action === 'keyChord') {
                 parseChord(slot.chord);
                 normalized.chord = String(slot.chord).trim();
+            } else if (action === 'executeMacro') {
+                const macroId = Number(slot.macroId) >>> 0;
+                if (!macroId) throw new Error(`轮盘槽位 ${index + 1} 没有选择宏`);
+                normalized.macroId = macroId;
             }
             return normalized;
         })
@@ -147,7 +159,7 @@ function serializeWheelConfig(config) {
         if (slot.action === 'keyChord') ({ modifiers, keyCode } = parseChord(slot.chord));
         payload.writeUInt8(modifiers, offset + 1);
         payload.writeUInt16BE(keyCode, offset + 2);
-        payload.writeUInt32BE(0, offset + 4);
+        payload.writeUInt32BE(slot.action === 'executeMacro' ? slot.macroId >>> 0 : 0, offset + 4);
         copyUtf8Label(payload, offset + 8, slot.label);
     });
     return payload;
@@ -168,6 +180,34 @@ function loadWheelConfig() {
     try {
         if (fs.existsSync(paths.json)) {
             const normalized = normalizeWheelConfig(JSON.parse(fs.readFileSync(paths.json, 'utf8')));
+            const legacyPenSlot = normalized.slots[8];
+            let migrated = false;
+            if (legacyPenSlot && legacyPenSlot.action === 'keyChord' &&
+                String(legacyPenSlot.chord).toUpperCase() === 'B' &&
+                ['画笔', 'Pen'].includes(legacyPenSlot.label)) {
+                normalized.slots[8] = { label: '宏操作库', action: 'macroLibrary' };
+                migrated = true;
+            }
+            const legacyEraserSlot = normalized.slots[9];
+            if (legacyEraserSlot && legacyEraserSlot.action === 'keyChord' &&
+                String(legacyEraserSlot.chord).toUpperCase() === 'E' &&
+                ['橡皮擦', 'Eraser'].includes(legacyEraserSlot.label)) {
+                normalized.slots[9] = { label: '橡皮擦模式', action: 'toggleEraserMode' };
+                migrated = true;
+            }
+            if (normalized.slots[12]?.action === 'saveLastTap') {
+                normalized.slots[12] = { label: '进入鼠标模式', action: 'enterMouseMode' };
+                migrated = true;
+            }
+            if (normalized.slots[13]?.action === 'replayLastTap') {
+                normalized.slots[13] = { label: '退出鼠标模式', action: 'exitMouseMode' };
+                migrated = true;
+            }
+            if (normalized.slots[15]?.action === 'replayLatest' && normalized.slots[15].label === '回放保存') {
+                normalized.slots[15].label = '最近录制';
+                migrated = true;
+            }
+            if (migrated) return saveWheelConfig(normalized);
             fs.mkdirSync(paths.root, { recursive: true });
             fs.mkdirSync(paths.macros, { recursive: true });
             fs.writeFileSync(paths.binary, serializeWheelConfig(normalized));
@@ -179,27 +219,188 @@ function loadWheelConfig() {
     return saveWheelConfig(defaultWheelConfig());
 }
 
+const MACRO_STEP_TYPES = Object.freeze({
+    keyChord: 1,
+    mouseClick: 2,
+    delay: 3,
+    penPlayback: 4
+});
+
+function nextMacroId(items = []) {
+    const used = new Set(items.map(item => Number(item.id) >>> 0));
+    let id = Date.now() >>> 0;
+    if (!id) id = 1;
+    while (used.has(id)) id = (id + 1) >>> 0 || 1;
+    return id;
+}
+
+function normalizeMacroStep(step) {
+    const type = Object.prototype.hasOwnProperty.call(MACRO_STEP_TYPES, step?.type)
+        ? step.type
+        : null;
+    if (!type) throw new Error('宏包含不支持的步骤');
+    if (type === 'keyChord') {
+        const chord = String(step.chord || '').trim();
+        parseChord(chord);
+        return { type, chord };
+    }
+    if (type === 'mouseClick') {
+        const button = ['left', 'double', 'right'].includes(step.button) ? step.button : 'left';
+        return { type, button };
+    }
+    if (type === 'delay') {
+        const ms = Math.max(0, Math.min(10000, Math.round(Number(step.ms) || 0)));
+        return { type, ms };
+    }
+    const recordingId = Number(step.recordingId) >>> 0;
+    if (!recordingId) throw new Error('笔迹回放步骤缺少录制 ID');
+    return { type, recordingId };
+}
+
+function normalizeMacroLibrary(library) {
+    const rawItems = Array.isArray(library?.items) ? library.items : [];
+    if (rawItems.length > 256) throw new Error('宏操作库最多支持 256 个项目');
+    const ids = new Set();
+    const items = rawItems.map((item, index) => {
+        const id = Number(item.id) >>> 0;
+        if (!id || ids.has(id)) throw new Error(`宏 ${index + 1} 的 ID 无效或重复`);
+        ids.add(id);
+        const name = String(item.name || `宏 ${index + 1}`).trim().slice(0, 24);
+        const steps = (Array.isArray(item.steps) ? item.steps : []).map(normalizeMacroStep);
+        if (steps.length === 0 || steps.length > 128) throw new Error(`${name} 必须包含 1 到 128 个步骤`);
+        return {
+            id,
+            name,
+            category: String(item.category || '未分类').trim().slice(0, 24),
+            favorite: !!item.favorite,
+            createdAt: Number(item.createdAt) || Date.now(),
+            updatedAt: Number(item.updatedAt) || Date.now(),
+            steps
+        };
+    });
+    const ignoredRecordingIds = [...new Set((Array.isArray(library?.ignoredRecordingIds)
+        ? library.ignoredRecordingIds : []).map(value => Number(value) >>> 0).filter(Boolean))];
+    return { version: 1, revision: (Number(library?.revision) || Date.now()) >>> 0,
+        ignoredRecordingIds, items };
+}
+
+function serializeMacroLibrary(library) {
+    const chunks = [];
+    const header = Buffer.alloc(16);
+    header.write('RML1', 0, 'ascii');
+    header.writeUInt16BE(1, 4);
+    header.writeUInt16BE(0, 6);
+    header.writeUInt32BE(library.revision >>> 0, 8);
+    header.writeUInt32BE(library.items.length, 12);
+    chunks.push(header);
+    for (const item of library.items) {
+        const itemHeader = Buffer.alloc(40);
+        itemHeader.writeUInt32BE(item.id >>> 0, 0);
+        itemHeader.writeUInt16BE(item.steps.length, 4);
+        copyUtf8Label(itemHeader, 8, item.name);
+        chunks.push(itemHeader);
+        for (const step of item.steps) {
+            const encoded = Buffer.alloc(12);
+            encoded.writeUInt8(MACRO_STEP_TYPES[step.type], 0);
+            if (step.type === 'keyChord') {
+                const parsed = parseChord(step.chord);
+                encoded.writeUInt8(parsed.modifiers, 1);
+                encoded.writeUInt16BE(parsed.keyCode, 2);
+            } else if (step.type === 'mouseClick') {
+                encoded.writeUInt32BE({ left: 1, double: 2, right: 3 }[step.button], 4);
+            } else if (step.type === 'delay') {
+                encoded.writeUInt32BE(step.ms >>> 0, 4);
+            } else if (step.type === 'penPlayback') {
+                encoded.writeUInt32BE(step.recordingId >>> 0, 4);
+            }
+            chunks.push(encoded);
+        }
+    }
+    return Buffer.concat(chunks);
+}
+
+function discoverRecordedMacros(library) {
+    const paths = wheelPaths();
+    fs.mkdirSync(paths.macros, { recursive: true });
+    const known = new Set();
+    for (const id of library.ignoredRecordingIds || []) known.add(id >>> 0);
+    for (const item of library.items) {
+        for (const step of item.steps) {
+            if (step.type === 'penPlayback') known.add(step.recordingId >>> 0);
+        }
+    }
+    const numericFiles = fs.readdirSync(paths.macros).filter(name => /^\d+\.rdm$/i.test(name));
+    let changed = false;
+    for (const fileName of numericFiles) {
+        const recordingId = Number(path.basename(fileName, '.rdm')) >>> 0;
+        if (!recordingId || known.has(recordingId)) continue;
+        const stat = fs.statSync(path.join(paths.macros, fileName));
+        library.items.push({
+            id: recordingId,
+            name: `录制 ${stat.mtime.toLocaleString('zh-CN', { hour12: false })}`.slice(0, 24),
+            category: '笔操作录制',
+            favorite: false,
+            createdAt: stat.mtimeMs,
+            updatedAt: stat.mtimeMs,
+            steps: [{ type: 'penPlayback', recordingId }]
+        });
+        known.add(recordingId);
+        changed = true;
+    }
+    const legacyPath = path.join(paths.macros, 'latest.rdm');
+    if (library.items.length === 0 && known.size === 0 && fs.existsSync(legacyPath)) {
+        const recordingId = nextMacroId(library.items);
+        fs.copyFileSync(legacyPath, path.join(paths.macros, `${recordingId}.rdm`));
+        library.items.push({
+            id: recordingId,
+            name: '旧版最近录制',
+            category: '笔操作录制',
+            favorite: false,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            steps: [{ type: 'penPlayback', recordingId }]
+        });
+        changed = true;
+    }
+    return changed;
+}
+
+function saveMacroLibrary(library) {
+    const normalized = normalizeMacroLibrary({ ...library, revision: Date.now() });
+    const paths = wheelPaths();
+    fs.mkdirSync(paths.root, { recursive: true });
+    fs.mkdirSync(paths.macros, { recursive: true });
+    fs.writeFileSync(paths.macroLibraryJson, JSON.stringify(normalized, null, 2), 'utf8');
+    fs.writeFileSync(paths.macroLibraryBinary, serializeMacroLibrary(normalized));
+    return normalized;
+}
+
+function loadMacroLibrary() {
+    const paths = wheelPaths();
+    let library = { version: 1, revision: 1, ignoredRecordingIds: [], items: [] };
+    try {
+        if (fs.existsSync(paths.macroLibraryJson)) {
+            library = normalizeMacroLibrary(JSON.parse(fs.readFileSync(paths.macroLibraryJson, 'utf8')));
+        }
+    } catch (error) {
+        console.warn('[Macro] Library invalid, preserving file and starting empty:', error.message);
+    }
+    const discovered = discoverRecordedMacros(library);
+    if (discovered || !fs.existsSync(paths.macroLibraryBinary)) return saveMacroLibrary(library);
+    fs.writeFileSync(paths.macroLibraryBinary, serializeMacroLibrary(library));
+    return library;
+}
+
 function resourcePath(...parts) {
     return path.join(process.resourcesPath, ...parts);
 }
 
 // Dynamic Path Resolution
 function getHostExePath() {
-    const candidates = [
-        resourcePath('bin', 'ReDisplayHost.exe'),
-        path.join(__dirname, '..', 'bin', 'ReDisplayHost.exe'),
-        path.join(__dirname, 'resources', 'bin', 'ReDisplayHost.exe'),
-        path.join(__dirname, '..', 'Host', 'ReDisplayHost.exe'),
-        path.join(__dirname, '..', 'Host', 'ReDisplay.exe'),
-        path.join(__dirname, '..', '..', 'Host', 'ReDisplayHost.exe'),
-        path.join(__dirname, '..', '..', 'Host', 'ReDisplay.exe'),
-        path.join(__dirname, 'bin', 'ReDisplayHost.exe'),
-        path.join(__dirname, 'ReDisplayHost.exe')
-    ];
-    for (const p of candidates) {
-        if (fs.existsSync(p)) return p;
-    }
-    return path.join(__dirname, '..', 'Host', 'ReDisplayHost.exe');
+    return resolveHostExePath({
+        resourcesPath: process.resourcesPath,
+        appDir: __dirname
+    });
 }
 
 function getAdbPath() {
@@ -721,6 +922,12 @@ async function startHostProcess(config) {
     currentConfig = { ...currentConfig, ...config };
     updateTrayMenu();
     const exePath = getHostExePath();
+    if (!exePath) {
+        const error = '电脑端组件 ReDisplayHost.exe 缺失。请关闭所有 ReDisplay 窗口后重新启动。';
+        streamStatus = 'idle';
+        updateTrayMenu();
+        return { success: false, error };
+    }
 
     // Auto-check and auto-install/update the client APK. The pen protocol was
     // introduced in v4, so merely finding the package is not sufficient.
@@ -760,11 +967,13 @@ async function startHostProcess(config) {
     }
 
     loadWheelConfig();
+    loadMacroLibrary();
     const inputPaths = wheelPaths();
     const args = [
         '--gui',
         '--wheel-config', inputPaths.binary,
-        '--macro-dir', inputPaths.macros
+        '--macro-dir', inputPaths.macros,
+        '--macro-library', inputPaths.macroLibraryBinary
     ];
     if (config.display !== undefined && config.display !== null && config.display !== '') {
         args.push('--display', String(config.display));
@@ -1003,10 +1212,26 @@ if (!gotTheLock) {
             }
             return { success: true, config: saved, restarted };
         });
+        ipcMain.handle('get-macro-library', () => loadMacroLibrary());
+        ipcMain.handle('save-macro-library', async (event, library) => {
+            try {
+                const saved = saveMacroLibrary(library);
+                let restarted = false;
+                if (hostProcess) {
+                    const result = await restartHostProcess(currentConfig);
+                    if (!result.success) return result;
+                    restarted = true;
+                }
+                return { success: true, library: saved, restarted };
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        });
 
         // Hardware & Displays
         ipcMain.handle('get-displays', async () => {
             const exePath = getHostExePath();
+            if (!exePath) return [];
             return new Promise((resolve) => {
                 execFile(exePath, ['--list-displays'], { cwd: path.dirname(exePath) }, (err, stdout) => {
                     if (err || !stdout) {
@@ -1034,6 +1259,7 @@ if (!gotTheLock) {
 
         ipcMain.handle('get-devices', async () => {
             const exePath = getHostExePath();
+            if (!exePath) return [];
             return new Promise((resolve) => {
                 execFile(exePath, ['--list-devices'], { cwd: path.dirname(exePath) }, (err, stdout) => {
                     if (err || !stdout) {
@@ -1061,6 +1287,7 @@ if (!gotTheLock) {
 
         ipcMain.handle('get-gpu-info', async () => {
             const exePath = getHostExePath();
+            if (!exePath) return { gpuName: 'ReDisplayHost.exe 缺失' };
             return new Promise((resolve) => {
                 execFile(exePath, ['--list-displays'], { cwd: path.dirname(exePath) }, (err, stdout) => {
                     if (!err && stdout) {
