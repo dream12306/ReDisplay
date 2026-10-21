@@ -74,6 +74,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnClearLog = document.getElementById('btn-clear-log');
     const logDrawer = document.getElementById('log-drawer');
     const logConsole = document.getElementById('log-console');
+    const wheelEditor = document.getElementById('wheel-editor');
+    const btnWheelSave = document.getElementById('btn-wheel-save');
+    const btnWheelReset = document.getElementById('btn-wheel-reset');
+    const wheelSaveStatus = document.getElementById('wheel-save-status');
 
     // App State
     let isStreaming = false;
@@ -88,6 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let devicesList = [];
     let displaysList = [];
     let isClientInstalled = false;
+    let wheelRevision = 1;
 
     // Snapshot for safe revert & hot reconfig
     let savedConfig = {
@@ -935,7 +940,114 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    const wheelActionOptions = [
+        ['none', '空槽位'],
+        ['leftClick', '鼠标单击'],
+        ['doubleClick', '鼠标双击'],
+        ['keyChord', '键盘组合键'],
+        ['rightClick', '鼠标右键'],
+        ['recordingZone', '进入录制区'],
+        ['recordStart', '开始录制'],
+        ['recordStop', '结束并保存'],
+        ['recordCancel', '取消录制'],
+        ['saveLastStroke', '保存上次笔迹'],
+        ['saveLastTap', '保存上次点击'],
+        ['replayLastStroke', '重复上次笔迹'],
+        ['replayLastTap', '重复上次点击'],
+        ['replayLatest', '回放已保存操作']
+    ];
+
+    function renderWheelConfig(config) {
+        if (!config || !Array.isArray(config.slots)) return;
+        wheelRevision = config.revision || 1;
+        wheelEditor.innerHTML = '';
+        config.slots.forEach((slot, index) => {
+            const row = document.createElement('div');
+            row.className = 'wheel-slot-row';
+            row.dataset.index = String(index);
+
+            const position = document.createElement('span');
+            position.className = 'wheel-slot-position';
+            position.textContent = `${index < 8 ? '内环' : '外环'} ${index % 8 + 1}`;
+
+            const label = document.createElement('input');
+            label.className = 'wheel-slot-input wheel-label';
+            label.maxLength = 24;
+            label.value = slot.label || '';
+            label.setAttribute('aria-label', `${position.textContent}名称`);
+
+            const action = document.createElement('select');
+            action.className = 'wheel-slot-select wheel-action';
+            wheelActionOptions.forEach(([value, text]) => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = text;
+                action.appendChild(option);
+            });
+            action.value = slot.action || 'none';
+
+            const chord = document.createElement('input');
+            chord.className = 'wheel-slot-input wheel-chord';
+            chord.placeholder = '如 Ctrl+Z';
+            chord.value = slot.chord || '';
+            chord.disabled = action.value !== 'keyChord';
+            action.addEventListener('change', () => {
+                chord.disabled = action.value !== 'keyChord';
+                if (!chord.disabled && !chord.value) chord.focus();
+            });
+
+            row.append(position, label, action, chord);
+            wheelEditor.appendChild(row);
+        });
+    }
+
+    function collectWheelConfig() {
+        const slots = Array.from(wheelEditor.querySelectorAll('.wheel-slot-row')).map(row => ({
+            label: row.querySelector('.wheel-label').value.trim(),
+            action: row.querySelector('.wheel-action').value,
+            chord: row.querySelector('.wheel-chord').value.trim()
+        }));
+        return { version: 2, revision: wheelRevision, slots };
+    }
+
+    async function loadWheelConfigEditor() {
+        try {
+            renderWheelConfig(await window.api.getWheelConfig());
+        } catch (error) {
+            wheelSaveStatus.textContent = `加载失败: ${error.message}`;
+        }
+    }
+
+    btnWheelSave.addEventListener('click', async () => {
+        btnWheelSave.disabled = true;
+        wheelSaveStatus.textContent = '正在保存…';
+        const result = await window.api.saveWheelConfig(collectWheelConfig());
+        btnWheelSave.disabled = false;
+        if (!result.success) {
+            wheelSaveStatus.textContent = result.error || '保存失败';
+            appendLog(`轮盘配置保存失败: ${result.error}`, 'error');
+            return;
+        }
+        renderWheelConfig(result.config);
+        wheelSaveStatus.textContent = result.restarted ? '已保存并重启串流' : '已保存，下次启动生效';
+        appendLog(result.restarted ? '轮盘配置已保存并热重启生效。' : '轮盘配置已保存。');
+    });
+
+    btnWheelReset.addEventListener('click', async () => {
+        btnWheelReset.disabled = true;
+        const result = await window.api.resetWheelConfig();
+        btnWheelReset.disabled = false;
+        if (!result.success) {
+            wheelSaveStatus.textContent = result.error || '恢复失败';
+            return;
+        }
+        renderWheelConfig(result.config);
+        wheelSaveStatus.textContent = result.restarted ? '默认配置已生效' : '已恢复默认配置';
+        appendLog('轮盘已恢复默认配置。');
+    });
+
     // Initial load
+    loadWheelConfigEditor();
     loadGpuInfo();
     loadDevices();
     loadDisplays();

@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('api', {
     stopStream: (serial) => ipcRenderer.invoke('stop-stream', serial),
     restartStream: (config) => ipcRenderer.invoke('restart-stream', config),
     getServiceStatus: () => ipcRenderer.invoke('get-service-status'),
+    getWheelConfig: () => ipcRenderer.invoke('get-wheel-config'),
+    saveWheelConfig: (config) => ipcRenderer.invoke('save-wheel-config', config),
+    resetWheelConfig: () => ipcRenderer.invoke('reset-wheel-config'),
 
     // Detection & Hardware
     getDevices: () => ipcRenderer.invoke('get-devices'),

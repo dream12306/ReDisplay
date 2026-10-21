@@ -7,7 +7,10 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.ArrayDeque;
+import java.util.List;
 import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -17,7 +20,26 @@ public class NetworkServer implements Runnable {
     public static final int MAGIC = 0x52445350; // "RDSP"
     public static final int PACKET_TYPE_PONG = 4;
     public static final int PACKET_TYPE_PEN = 5;
+    public static final int PACKET_TYPE_WHEEL_CONFIG = 6;
+    public static final int PACKET_TYPE_INPUT_COMMAND = 7;
     public static final int PEN_PAYLOAD_SIZE = 20;
+    public static final int INPUT_COMMAND_PAYLOAD_SIZE = 20;
+
+    public static final int INPUT_ACTION_NONE = 0;
+    public static final int INPUT_ACTION_KEY_CHORD = 1;
+    public static final int INPUT_ACTION_RIGHT_CLICK = 2;
+    public static final int INPUT_ACTION_RECORDING_ZONE = 3;
+    public static final int INPUT_ACTION_RECORD_START = 4;
+    public static final int INPUT_ACTION_RECORD_STOP = 5;
+    public static final int INPUT_ACTION_RECORD_CANCEL = 6;
+    public static final int INPUT_ACTION_SAVE_LAST_STROKE = 7;
+    public static final int INPUT_ACTION_SAVE_LAST_TAP = 8;
+    public static final int INPUT_ACTION_REPLAY_LAST_STROKE = 9;
+    public static final int INPUT_ACTION_REPLAY_LAST_TAP = 10;
+    public static final int INPUT_ACTION_REPLAY_LATEST = 11;
+    public static final int INPUT_ACTION_BACK = 12;
+    public static final int INPUT_ACTION_LEFT_CLICK = 13;
+    public static final int INPUT_ACTION_DOUBLE_CLICK = 14;
 
     public static final int PEN_ACTION_HOVER_ENTER = 1;
     public static final int PEN_ACTION_HOVER_MOVE = 2;
@@ -37,6 +59,33 @@ public class NetworkServer implements Runnable {
         void onDisconnected();
         void onResolutionChanged(int width, int height, int fps);
         void onStatsUpdate(float fps, int bitrateKbps);
+        void onWheelConfig(WheelConfig config);
+    }
+
+    public static final class WheelSlot {
+        public final int action;
+        public final int modifiers;
+        public final int keyCode;
+        public final long parameter;
+        public final String label;
+
+        WheelSlot(int action, int modifiers, int keyCode, long parameter, String label) {
+            this.action = action;
+            this.modifiers = modifiers;
+            this.keyCode = keyCode;
+            this.parameter = parameter;
+            this.label = label;
+        }
+    }
+
+    public static final class WheelConfig {
+        public final long revision;
+        public final List<WheelSlot> slots;
+
+        WheelConfig(long revision, List<WheelSlot> slots) {
+            this.revision = revision;
+            this.slots = slots;
+        }
     }
 
     private final VideoDecoder decoder;
@@ -46,6 +95,7 @@ public class NetworkServer implements Runnable {
     private volatile Socket clientSocket;
     private volatile ClientWriter clientWriter;
     private final AtomicInteger penSequence = new AtomicInteger();
+    private final AtomicInteger commandSequence = new AtomicInteger();
     private Thread serverThread;
 
     public NetworkServer(VideoDecoder decoder, StatusListener listener) {
@@ -149,6 +199,26 @@ public class NetworkServer implements Runnable {
         return writer.enqueuePen(packet);
     }
 
+    public boolean sendInputCommand(WheelSlot slot, int normalizedX, int normalizedY) {
+        if (slot == null) return false;
+        ClientWriter writer = clientWriter;
+        if (writer == null) return false;
+        InputCommand command = new InputCommand();
+        command.sequence = commandSequence.incrementAndGet();
+        command.action = slot.action;
+        command.modifiers = slot.modifiers;
+        command.keyCode = slot.keyCode;
+        command.x = clampUnsignedShort(normalizedX);
+        command.y = clampUnsignedShort(normalizedY);
+        command.parameter = slot.parameter;
+        command.timestampUs = android.os.SystemClock.uptimeMillis() * 1000L;
+        return writer.enqueueCommand(command);
+    }
+
+    public boolean sendInputCommand(int action, int normalizedX, int normalizedY) {
+        return sendInputCommand(new WheelSlot(action, 0, 0, 0, ""), normalizedX, normalizedY);
+    }
+
     private static int clampUnsignedShort(int value) {
         return Math.max(0, Math.min(65535, value));
     }
@@ -210,6 +280,15 @@ public class NetworkServer implements Runnable {
                     }
                 } else if (packetType == 3) { // Ping / Pong for latency measurement
                     writer.enqueuePong(timestampUs);
+                } else if (packetType == PACKET_TYPE_WHEEL_CONFIG) {
+                    WheelConfig config = parseWheelConfig(buffer, payloadSize);
+                    if (config != null) {
+                        Log.i(TAG, "Wheel config received: revision=" + config.revision
+                                + ", slots=" + config.slots.size());
+                        if (listener != null) listener.onWheelConfig(config);
+                    } else {
+                        Log.w(TAG, "Rejected invalid wheel config payload, bytes=" + payloadSize);
+                    }
                 }
 
                 // Periodic stats update
@@ -237,6 +316,42 @@ public class NetworkServer implements Runnable {
         }
     }
 
+    private static WheelConfig parseWheelConfig(byte[] buffer, int payloadSize) {
+        final int headerSize = 8;
+        final int slotSize = 40;
+        final int slotCount = 16;
+        if (payloadSize != headerSize + slotSize * slotCount) return null;
+        int schema = readUnsignedShort(buffer, 0);
+        int innerCount = buffer[2] & 0xFF;
+        int outerCount = buffer[3] & 0xFF;
+        if (schema != 2 || innerCount != 8 || outerCount != 8) return null;
+        long revision = readUnsignedInt(buffer, 4);
+        ArrayList<WheelSlot> slots = new ArrayList<>(slotCount);
+        for (int i = 0; i < slotCount; i++) {
+            int offset = headerSize + i * slotSize;
+            int action = buffer[offset] & 0xFF;
+            int modifiers = buffer[offset + 1] & 0xFF;
+            int keyCode = readUnsignedShort(buffer, offset + 2);
+            long parameter = readUnsignedInt(buffer, offset + 4);
+            int labelLength = 0;
+            while (labelLength < 32 && buffer[offset + 8 + labelLength] != 0) labelLength++;
+            String label = new String(buffer, offset + 8, labelLength, StandardCharsets.UTF_8);
+            slots.add(new WheelSlot(action, modifiers, keyCode, parameter, label));
+        }
+        return new WheelConfig(revision, slots);
+    }
+
+    private static int readUnsignedShort(byte[] bytes, int offset) {
+        return ((bytes[offset] & 0xFF) << 8) | (bytes[offset + 1] & 0xFF);
+    }
+
+    private static long readUnsignedInt(byte[] bytes, int offset) {
+        return ((long) (bytes[offset] & 0xFF) << 24)
+                | ((long) (bytes[offset + 1] & 0xFF) << 16)
+                | ((long) (bytes[offset + 2] & 0xFF) << 8)
+                | (long) (bytes[offset + 3] & 0xFF);
+    }
+
     private static final class PenPacket {
         int sequence;
         int action;
@@ -254,15 +369,28 @@ public class NetworkServer implements Runnable {
         }
     }
 
+    private static final class InputCommand {
+        int sequence;
+        int action;
+        int modifiers;
+        int keyCode;
+        int x;
+        int y;
+        long parameter;
+        long timestampUs;
+    }
+
     private static final class OutboundPacket {
         final int type;
         final long timestampUs;
         final PenPacket pen;
+        final InputCommand command;
 
-        OutboundPacket(int type, long timestampUs, PenPacket pen) {
+        OutboundPacket(int type, long timestampUs, PenPacket pen, InputCommand command) {
             this.type = type;
             this.timestampUs = timestampUs;
             this.pen = pen;
+            this.command = command;
         }
 
         boolean isCoalesciblePen() {
@@ -298,7 +426,7 @@ public class NetworkServer implements Runnable {
                 if (pen.isCoalescible() && tail != null && tail.pen != null
                         && tail.pen.action == pen.action) {
                     queue.removeLast();
-                    queue.addLast(new OutboundPacket(PACKET_TYPE_PEN, pen.timestampUs, pen));
+                    queue.addLast(new OutboundPacket(PACKET_TYPE_PEN, pen.timestampUs, pen, null));
                     queue.notifyAll();
                     return true;
                 }
@@ -316,7 +444,30 @@ public class NetworkServer implements Runnable {
                     if (!removedMove && pen.isCoalescible()) return false;
                 }
 
-                queue.addLast(new OutboundPacket(PACKET_TYPE_PEN, pen.timestampUs, pen));
+                queue.addLast(new OutboundPacket(PACKET_TYPE_PEN, pen.timestampUs, pen, null));
+                queue.notifyAll();
+                return true;
+            }
+        }
+
+        boolean enqueueCommand(InputCommand command) {
+            synchronized (queue) {
+                if (!active) return false;
+                if (queue.size() >= MAX_QUEUE_DEPTH) {
+                    Iterator<OutboundPacket> iterator = queue.iterator();
+                    while (iterator.hasNext()) {
+                        if (iterator.next().isCoalesciblePen()) {
+                            iterator.remove();
+                            break;
+                        }
+                    }
+                }
+                queue.addLast(new OutboundPacket(
+                        PACKET_TYPE_INPUT_COMMAND,
+                        command.timestampUs,
+                        null,
+                        command
+                ));
                 queue.notifyAll();
                 return true;
             }
@@ -325,7 +476,7 @@ public class NetworkServer implements Runnable {
         void enqueuePong(long timestampUs) {
             synchronized (queue) {
                 if (!active) return;
-                queue.addLast(new OutboundPacket(PACKET_TYPE_PONG, timestampUs, null));
+                queue.addLast(new OutboundPacket(PACKET_TYPE_PONG, timestampUs, null, null));
                 queue.notifyAll();
             }
         }
@@ -372,7 +523,9 @@ public class NetworkServer implements Runnable {
         }
 
         private void writePacket(OutboundPacket packet) throws IOException {
-            int payloadSize = packet.pen != null ? PEN_PAYLOAD_SIZE : 0;
+            int payloadSize = packet.pen != null
+                    ? PEN_PAYLOAD_SIZE
+                    : (packet.command != null ? INPUT_COMMAND_PAYLOAD_SIZE : 0);
             out.writeInt(MAGIC);
             out.writeByte(packet.type);
             out.writeByte(0);
@@ -392,6 +545,17 @@ public class NetworkServer implements Runnable {
                 out.writeShort(pen.tiltXHundredths);
                 out.writeShort(pen.tiltYHundredths);
                 out.writeShort(0);
+            }
+            InputCommand command = packet.command;
+            if (command != null) {
+                out.writeInt(command.sequence);
+                out.writeByte(command.action);
+                out.writeByte(command.modifiers);
+                out.writeShort(command.keyCode);
+                out.writeShort(command.x);
+                out.writeShort(command.y);
+                out.writeInt((int) command.parameter);
+                out.writeInt(0);
             }
             out.flush();
         }

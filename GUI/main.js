@@ -23,7 +23,161 @@ let activeStreamDeviceName = '';
 let activeStreamSerial = '';
 let hasShownTrayTip = false;
 let lastTrayUpdateTime = 0;
-const PACKAGED_CLIENT_VERSION_CODE = 4;
+const PACKAGED_CLIENT_VERSION_CODE = 6;
+
+const WHEEL_ACTIONS = Object.freeze({
+    none: 0,
+    keyChord: 1,
+    rightClick: 2,
+    recordingZone: 3,
+    recordStart: 4,
+    recordStop: 5,
+    recordCancel: 6,
+    saveLastStroke: 7,
+    saveLastTap: 8,
+    replayLastStroke: 9,
+    replayLastTap: 10,
+    replayLatest: 11,
+    leftClick: 13,
+    doubleClick: 14
+});
+
+function defaultWheelConfig() {
+    return {
+        version: 2,
+        revision: 1,
+        slots: [
+            { label: '单击', action: 'leftClick' },
+            { label: '双击', action: 'doubleClick' },
+            { label: '右键', action: 'rightClick' },
+            { label: 'Enter', action: 'keyChord', chord: 'Enter' },
+            { label: '复制', action: 'keyChord', chord: 'Ctrl+C' },
+            { label: '粘贴', action: 'keyChord', chord: 'Ctrl+V' },
+            { label: '撤销', action: 'keyChord', chord: 'Ctrl+Z' },
+            { label: '重做', action: 'keyChord', chord: 'Ctrl+Y' },
+            { label: '画笔', action: 'keyChord', chord: 'B' },
+            { label: '橡皮擦', action: 'keyChord', chord: 'E' },
+            { label: '保存笔迹', action: 'saveLastStroke' },
+            { label: '重复笔迹', action: 'replayLastStroke' },
+            { label: '保存点击', action: 'saveLastTap' },
+            { label: '重复点击', action: 'replayLastTap' },
+            { label: '录制区', action: 'recordingZone' },
+            { label: '回放保存', action: 'replayLatest' },
+        ]
+    };
+}
+
+function wheelPaths() {
+    const root = path.join(app.getPath('userData'), 'input');
+    return {
+        root,
+        json: path.join(root, 'wheel-config.json'),
+        binary: path.join(root, 'wheel-config.bin'),
+        macros: path.join(root, 'macros')
+    };
+}
+
+function parseChord(chord) {
+    const parts = String(chord || '').split('+').map(part => part.trim().toUpperCase()).filter(Boolean);
+    let modifiers = 0;
+    let keyCode = 0;
+    const namedKeys = {
+        BACKSPACE: 8, TAB: 9, ENTER: 13, RETURN: 13, ESC: 27, ESCAPE: 27,
+        SPACE: 32, PAGEUP: 33, PGUP: 33, PAGEDOWN: 34, PGDN: 34,
+        END: 35, HOME: 36, LEFT: 37, UP: 38, RIGHT: 39, DOWN: 40,
+        INSERT: 45, DELETE: 46
+    };
+    for (let index = 1; index <= 12; index++) namedKeys[`F${index}`] = 111 + index;
+    for (const part of parts) {
+        if (part === 'CTRL' || part === 'CONTROL') modifiers |= 1;
+        else if (part === 'SHIFT') modifiers |= 2;
+        else if (part === 'ALT') modifiers |= 4;
+        else if (part === 'WIN' || part === 'WINDOWS' || part === 'META') modifiers |= 8;
+        else if (/^[A-Z0-9]$/.test(part)) keyCode = part.charCodeAt(0);
+        else if (namedKeys[part]) keyCode = namedKeys[part];
+        else throw new Error(`不支持的按键: ${part}`);
+    }
+    if (!keyCode) throw new Error('快捷键必须包含一个主按键');
+    return { modifiers, keyCode };
+}
+
+function normalizeWheelConfig(config) {
+    if (!config || !Array.isArray(config.slots) || config.slots.length !== 16) {
+        throw new Error('轮盘必须正好包含内环 8 格和外环 8 格');
+    }
+    return {
+        version: 2,
+        revision: (Number(config.revision) || Date.now()) >>> 0,
+        slots: config.slots.map((slot, index) => {
+            const action = Object.prototype.hasOwnProperty.call(WHEEL_ACTIONS, slot.action)
+                ? slot.action
+                : 'none';
+            const label = String(slot.label || `功能 ${index + 1}`).trim().slice(0, 24);
+            const normalized = { label, action };
+            if (action === 'keyChord') {
+                parseChord(slot.chord);
+                normalized.chord = String(slot.chord).trim();
+            }
+            return normalized;
+        })
+    };
+}
+
+function copyUtf8Label(buffer, offset, label) {
+    let bytes = Buffer.alloc(0);
+    for (const character of String(label)) {
+        const next = Buffer.from(character, 'utf8');
+        if (bytes.length + next.length > 31) break;
+        bytes = Buffer.concat([bytes, next]);
+    }
+    bytes.copy(buffer, offset);
+}
+
+function serializeWheelConfig(config) {
+    const payload = Buffer.alloc(8 + 16 * 40);
+    payload.writeUInt16BE(2, 0);
+    payload.writeUInt8(8, 2);
+    payload.writeUInt8(8, 3);
+    payload.writeUInt32BE(config.revision >>> 0, 4);
+    config.slots.forEach((slot, index) => {
+        const offset = 8 + index * 40;
+        payload.writeUInt8(WHEEL_ACTIONS[slot.action], offset);
+        let modifiers = 0;
+        let keyCode = 0;
+        if (slot.action === 'keyChord') ({ modifiers, keyCode } = parseChord(slot.chord));
+        payload.writeUInt8(modifiers, offset + 1);
+        payload.writeUInt16BE(keyCode, offset + 2);
+        payload.writeUInt32BE(0, offset + 4);
+        copyUtf8Label(payload, offset + 8, slot.label);
+    });
+    return payload;
+}
+
+function saveWheelConfig(config) {
+    const normalized = normalizeWheelConfig({ ...config, revision: Date.now() });
+    const paths = wheelPaths();
+    fs.mkdirSync(paths.root, { recursive: true });
+    fs.mkdirSync(paths.macros, { recursive: true });
+    fs.writeFileSync(paths.json, JSON.stringify(normalized, null, 2), 'utf8');
+    fs.writeFileSync(paths.binary, serializeWheelConfig(normalized));
+    return normalized;
+}
+
+function loadWheelConfig() {
+    const paths = wheelPaths();
+    try {
+        if (fs.existsSync(paths.json)) {
+            const normalized = normalizeWheelConfig(JSON.parse(fs.readFileSync(paths.json, 'utf8')));
+            fs.mkdirSync(paths.root, { recursive: true });
+            fs.mkdirSync(paths.macros, { recursive: true });
+            fs.writeFileSync(paths.binary, serializeWheelConfig(normalized));
+            return normalized;
+        }
+    } catch (error) {
+        console.warn('[Wheel] Config invalid, restoring defaults:', error.message);
+    }
+    return saveWheelConfig(defaultWheelConfig());
+}
 
 function resourcePath(...parts) {
     return path.join(process.resourcesPath, ...parts);
@@ -605,7 +759,13 @@ async function startHostProcess(config) {
         }
     }
 
-    const args = ['--gui'];
+    loadWheelConfig();
+    const inputPaths = wheelPaths();
+    const args = [
+        '--gui',
+        '--wheel-config', inputPaths.binary,
+        '--macro-dir', inputPaths.macros
+    ];
     if (config.display !== undefined && config.display !== null && config.display !== '') {
         args.push('--display', String(config.display));
     }
@@ -818,6 +978,31 @@ if (!gotTheLock) {
         ipcMain.handle('stop-stream', (event, serial) => stopHostProcess(serial));
         ipcMain.handle('restart-stream', async (event, config) => restartHostProcess(config));
         ipcMain.handle('get-service-status', () => ({ running: !!hostProcess }));
+        ipcMain.handle('get-wheel-config', () => loadWheelConfig());
+        ipcMain.handle('save-wheel-config', async (event, config) => {
+            try {
+                const saved = saveWheelConfig(config);
+                let restarted = false;
+                if (hostProcess) {
+                    const result = await restartHostProcess(currentConfig);
+                    if (!result.success) return result;
+                    restarted = true;
+                }
+                return { success: true, config: saved, restarted };
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        });
+        ipcMain.handle('reset-wheel-config', async () => {
+            const saved = saveWheelConfig(defaultWheelConfig());
+            let restarted = false;
+            if (hostProcess) {
+                const result = await restartHostProcess(currentConfig);
+                if (!result.success) return result;
+                restarted = true;
+            }
+            return { success: true, config: saved, restarted };
+        });
 
         // Hardware & Displays
         ipcMain.handle('get-displays', async () => {

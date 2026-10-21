@@ -18,7 +18,7 @@
                 <img src="../assets/icon.png" width="22" height="22" style="border-radius: 5px; display: block;" alt="ReDisplay">
             </div>
             <span class="app-title">ReDisplay</span>
-            <span class="version-tag">v2.0 Pro</span>
+            <span class="version-tag">v1.5.0</span>
             <div id="status-pill" class="status-badge status-idle">
                 <span class="badge-dot"></span>
                 <span id="status-text">待机就绪</span>
@@ -283,6 +283,24 @@
                 </div>
             </section>
         </div>
+
+        <section class="md3-card wheel-config-card">
+            <div class="wheel-config-header">
+                <div class="card-title-row">
+                    <h2 class="card-title">小米触控笔双环轮盘</h2>
+                    <span class="card-subtitle">短按下键打开内外各 8 格轮盘；点中心或轮盘外取消。上键开始录制，下键结束并保存。</span>
+                </div>
+                <div class="wheel-config-actions">
+                    <span id="wheel-save-status" class="wheel-save-status">配置保存在电脑端</span>
+                    <button id="btn-wheel-reset" class="md3-btn md3-btn-outlined">恢复默认</button>
+                    <button id="btn-wheel-save" class="md3-btn md3-btn-tonal">保存轮盘</button>
+                </div>
+            </div>
+            <div class="wheel-editor-head">
+                <span>位置</span><span>显示名称</span><span>执行动作</span><span>组合键</span>
+            </div>
+            <div id="wheel-editor" class="wheel-editor"></div>
+        </section>
 
         <!-- Bottom Actions Bar -->
         <section class="action-bar">

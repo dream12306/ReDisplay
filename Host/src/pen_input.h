@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <string>
 #include <thread>
 
 class PenInputReceiver {
@@ -14,7 +15,8 @@ public:
         LONG displayLeft,
         LONG displayTop,
         int displayWidth,
-        int displayHeight
+        int displayHeight,
+        std::string macroDirectory
     );
     ~PenInputReceiver();
 
@@ -34,6 +36,7 @@ private:
     LONG m_displayTop;
     int m_displayWidth;
     int m_displayHeight;
+    std::string m_macroDirectory;
     std::atomic<bool> m_running{ false };
     std::atomic<uint64_t> m_injectedEvents{ 0 };
     std::thread m_thread;

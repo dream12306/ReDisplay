@@ -23,6 +23,7 @@
 #include "capture.h"
 #include "bounded_frame_queue.h"
 #include "pen_input.h"
+#include "wheel_config.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -175,6 +176,8 @@ int main(int argc, char* argv[]) {
     int prefDisplayIdx = -1;
     std::string prefSerial = "";
     std::string bufferMode = "lowlatency";
+    std::string wheelConfigPath;
+    std::string macroDirectory;
     bool isGui = false;
 
     // Check for helper commands first
@@ -242,6 +245,10 @@ int main(int argc, char* argv[]) {
             prefSerial = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
             port = atoi(argv[++i]);
+        } else if (arg == "--wheel-config" && i + 1 < argc) {
+            wheelConfigPath = argv[++i];
+        } else if (arg == "--macro-dir" && i + 1 < argc) {
+            macroDirectory = argv[++i];
         } else if (i == 1 && arg[0] != '-') {
             prefDisplayIdx = atoi(argv[1]);
         } else if (i == 2 && arg[0] != '-') {
@@ -268,6 +275,15 @@ int main(int argc, char* argv[]) {
         std::cout << "  ReDisplay: Ultra-Low Latency Wired Secondary Display Host" << std::endl;
         std::cout << "  Target: Android tablet display + Windows Ink pen bridge" << std::endl;
         std::cout << "============================================================" << std::endl;
+    }
+
+    bool loadedWheelConfig = false;
+    const std::vector<uint8_t> wheelConfigPayload = LoadWheelConfigPayload(
+        wheelConfigPath,
+        &loadedWheelConfig
+    );
+    if (!wheelConfigPath.empty() && !loadedWheelConfig) {
+        std::cerr << "[Wheel] Invalid or missing config; using safe defaults." << std::endl;
     }
 
     // Initialize Winsock
@@ -466,6 +482,16 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        PacketHeader wheelHeader{};
+        wheelHeader.magic = htonl(REDISPLAY_MAGIC);
+        wheelHeader.packet_type = PACKET_TYPE_WHEEL_CONFIG;
+        wheelHeader.payload_size = htonl(static_cast<uint32_t>(wheelConfigPayload.size()));
+        if (!SendAll(sock, &wheelHeader, sizeof(wheelHeader)) ||
+            !SendAll(sock, wheelConfigPayload.data(), wheelConfigPayload.size())) {
+            closesocket(sock);
+            continue;
+        }
+
         // Create D3D11 Device
         ID3D11Device* pD3DDevice = nullptr;
         ID3D11DeviceContext* pD3DContext = nullptr;
@@ -523,7 +549,8 @@ int main(int argc, char* argv[]) {
             disp.rect.left,
             disp.rect.top,
             targetWidth,
-            targetHeight
+            targetHeight,
+            macroDirectory
         );
         penInputReceiver.Start();
 
