@@ -58,6 +58,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const presetTags = document.querySelectorAll('.preset-tag');
     const segBufferBtns = document.querySelectorAll('#seg-buffermode .seg-btn');
     const switchAutoreconnect = document.getElementById('switch-autoreconnect');
+    const segTouchInputBtns = document.querySelectorAll('#seg-touch-input .seg-btn');
+    const valTouchMode = document.getElementById('val-touch-mode');
+    const sliderTouchPressure = document.getElementById('slider-touch-pressure');
+    const valTouchPressure = document.getElementById('val-touch-pressure');
 
     // Reconfiguration Confirm Banner Elements
     const reconfigBanner = document.getElementById('reconfig-confirm-banner');
@@ -111,6 +115,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentHeight = 2800;
     let currentBufferMode = 'lowlatency';
     let currentOrientation = 'portrait';
+    let currentTouchInput = 'auto';
+    let currentTouchPressure = 55;
     let currentGpuName = '独立 GPU (NVENC)';
     let devicesList = [];
     let displaysList = [];
@@ -129,7 +135,9 @@ document.addEventListener('DOMContentLoaded', () => {
         width: 1752,
         height: 2800,
         bufferMode: 'lowlatency',
-        orientation: 'portrait'
+        orientation: 'portrait',
+        touchInput: 'auto',
+        touchPressure: 55
     };
     let reconfigTimer = null;
     let reconfigInterval = null;
@@ -508,6 +516,8 @@ document.addEventListener('DOMContentLoaded', () => {
             height: currentHeight,
             bufferMode: currentBufferMode,
             orientation: currentOrientation,
+            touchInput: currentTouchInput,
+            touchPressure: currentTouchPressure,
             port: 27183
         };
     }
@@ -520,7 +530,9 @@ document.addEventListener('DOMContentLoaded', () => {
             width: currentWidth,
             height: currentHeight,
             bufferMode: currentBufferMode,
-            orientation: currentOrientation
+            orientation: currentOrientation,
+            touchInput: currentTouchInput,
+            touchPressure: currentTouchPressure
         };
     }
 
@@ -531,6 +543,8 @@ document.addEventListener('DOMContentLoaded', () => {
         setFps(cfg.fps || 120, false, false);
         setBitrate(cfg.bitrate || 60, false, false);
         setBufferMode(cfg.bufferMode || 'lowlatency', false, false);
+        setTouchInput(cfg.touchInput || 'auto', false);
+        setTouchPressure(cfg.touchPressure || 55, false);
         if (cfg.width && cfg.height) {
             setResolution(cfg.width, cfg.height, false);
         } else if (cfg.orientation) {
@@ -823,6 +837,55 @@ document.addEventListener('DOMContentLoaded', () => {
             setBufferMode(btn.dataset.mode, true, true);
             appendLog(`延迟控制策略切换为: ${btn.textContent.trim()}`);
         });
+    });
+
+    function touchModeLabel(mode) {
+        if (mode === 'stylus') return '仅触控笔';
+        if (mode === 'finger') return '手指模拟笔';
+        return '自动识别';
+    }
+
+    async function persistTouchConfig() {
+        window.api.notifyConfigChanged(buildStreamConfig());
+        const result = await window.api.saveTouchConfig({
+            touchInput: currentTouchInput,
+            touchPressure: currentTouchPressure
+        });
+        if (!result.success) {
+            appendLog(`触控输入设置保存失败: ${result.error}`, 'error');
+            return;
+        }
+        appendLog(result.restarted
+            ? `触控输入已保存并生效：${touchModeLabel(currentTouchInput)}，压力 ${currentTouchPressure}%`
+            : `触控输入已保存：${touchModeLabel(currentTouchInput)}，压力 ${currentTouchPressure}%`);
+    }
+
+    function setTouchInput(mode, persist = true) {
+        currentTouchInput = ['auto', 'stylus', 'finger'].includes(mode) ? mode : 'auto';
+        segTouchInputBtns.forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.touchInput === currentTouchInput);
+        });
+        valTouchMode.textContent = touchModeLabel(currentTouchInput);
+        if (persist) persistTouchConfig();
+    }
+
+    function setTouchPressure(value, persist = true) {
+        currentTouchPressure = Math.max(10, Math.min(100, Number.parseInt(value, 10) || 55));
+        sliderTouchPressure.value = currentTouchPressure;
+        valTouchPressure.textContent = `${currentTouchPressure}%`;
+        if (persist) persistTouchConfig();
+    }
+
+    segTouchInputBtns.forEach(btn => {
+        btn.addEventListener('click', () => setTouchInput(btn.dataset.touchInput, true));
+    });
+
+    sliderTouchPressure.addEventListener('input', event => {
+        setTouchPressure(event.target.value, false);
+    });
+
+    sliderTouchPressure.addEventListener('change', event => {
+        setTouchPressure(event.target.value, true);
     });
 
     // 15. Start / Stop Streaming Pipeline
@@ -1236,14 +1299,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadEditors() {
         try {
-            const [library, config] = await Promise.all([
-                window.api.getMacroLibrary(), window.api.getWheelConfig()
+            const [library, config, touchConfig] = await Promise.all([
+                window.api.getMacroLibrary(), window.api.getWheelConfig(), window.api.getTouchConfig()
             ]);
             macroLibraryState = library;
             selectedMacroId = library.items[0]?.id || null;
             renderMacroList();
             renderMacroEditor();
             renderWheelConfig(config);
+            setTouchInput(touchConfig.touchInput, false);
+            setTouchPressure(touchConfig.touchPressure, false);
         } catch (error) {
             wheelSaveStatus.textContent = `加载失败: ${error.message}`;
             macroSaveStatus.textContent = `加载失败: ${error.message}`;

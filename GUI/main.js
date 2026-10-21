@@ -4,6 +4,7 @@ const { spawn, execFile, exec, execSync } = require('child_process');
 const readline = require('readline');
 const fs = require('fs');
 const { resolveHostExePath } = require('./lib/runtime-paths');
+const { normalizeTouchConfig } = require('./lib/touch-config');
 
 let mainWindow = null;
 let tray = null;
@@ -16,7 +17,9 @@ let currentConfig = {
     width: 1752,
     height: 2800,
     bufferMode: 'lowlatency',
-    orientation: 'portrait'
+    orientation: 'portrait',
+    touchInput: 'auto',
+    touchPressure: 55
 };
 let latestStats = { fps: 0, mbps: 0, encodeMs: 0, dropped: 0, frames: 0 };
 let streamStatus = 'idle'; // 'idle', 'connecting', 'streaming'
@@ -24,7 +27,7 @@ let activeStreamDeviceName = '';
 let activeStreamSerial = '';
 let hasShownTrayTip = false;
 let lastTrayUpdateTime = 0;
-const PACKAGED_CLIENT_VERSION_CODE = 8;
+const PACKAGED_CLIENT_VERSION_CODE = 12;
 
 const WHEEL_ACTIONS = Object.freeze({
     none: 0,
@@ -81,8 +84,27 @@ function wheelPaths() {
         binary: path.join(root, 'wheel-config.bin'),
         macros: path.join(root, 'macros'),
         macroLibraryJson: path.join(root, 'macro-library.json'),
-        macroLibraryBinary: path.join(root, 'macro-library.bin')
+        macroLibraryBinary: path.join(root, 'macro-library.bin'),
+        touchConfigJson: path.join(root, 'touch-input.json')
     };
+}
+
+function loadTouchConfig() {
+    const configPath = wheelPaths().touchConfigJson;
+    try {
+        return normalizeTouchConfig(JSON.parse(fs.readFileSync(configPath, 'utf8')));
+    } catch (error) {
+        return normalizeTouchConfig();
+    }
+}
+
+function saveTouchConfig(config) {
+    const paths = wheelPaths();
+    const normalized = normalizeTouchConfig(config);
+    fs.mkdirSync(paths.root, { recursive: true });
+    fs.writeFileSync(paths.touchConfigJson, JSON.stringify(normalized, null, 2), 'utf8');
+    currentConfig = { ...currentConfig, ...normalized };
+    return normalized;
 }
 
 function parseChord(chord) {
@@ -993,6 +1015,12 @@ async function startHostProcess(config) {
     if (config.bufferMode) {
         args.push('--buffer-mode', String(config.bufferMode));
     }
+    if (currentConfig.touchInput) {
+        args.push('--touch-input', String(currentConfig.touchInput));
+    }
+    if (currentConfig.touchPressure) {
+        args.push('--touch-pressure', String(currentConfig.touchPressure));
+    }
     if (config.serial) {
         args.push('--serial', String(config.serial));
     }
@@ -1163,6 +1191,7 @@ if (!gotTheLock) {
     });
 
     app.whenReady().then(() => {
+        currentConfig = { ...currentConfig, ...loadTouchConfig() };
         createWindow();
         createTray();
 
@@ -1188,6 +1217,21 @@ if (!gotTheLock) {
         ipcMain.handle('restart-stream', async (event, config) => restartHostProcess(config));
         ipcMain.handle('get-service-status', () => ({ running: !!hostProcess }));
         ipcMain.handle('get-wheel-config', () => loadWheelConfig());
+        ipcMain.handle('get-touch-config', () => loadTouchConfig());
+        ipcMain.handle('save-touch-config', async (event, config) => {
+            try {
+                const saved = saveTouchConfig(config);
+                let restarted = false;
+                if (hostProcess) {
+                    const result = await restartHostProcess(currentConfig);
+                    if (!result.success) return result;
+                    restarted = true;
+                }
+                return { success: true, config: saved, restarted };
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        });
         ipcMain.handle('save-wheel-config', async (event, config) => {
             try {
                 const saved = saveWheelConfig(config);

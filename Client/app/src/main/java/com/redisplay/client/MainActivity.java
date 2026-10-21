@@ -11,16 +11,19 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Choreographer;
 import android.view.Display;
 import android.view.GestureDetector;
+import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -53,6 +56,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     private final WheelInteractionState wheelInteractionState = new WheelInteractionState();
     private final WheelGestureGuard wheelGestureGuard = new WheelGestureGuard();
     private final float[] penCoordinates = new float[2];
+    private FingerGestureState fingerGestureState;
+    private int fingerPrimaryPointerId = -1;
+    private int touchInputMode = TouchInputConfig.MODE_AUTO;
+    private int touchPressurePercent = TouchInputConfig.DEFAULT_PRESSURE_PERCENT;
+    private long lastStylusEventMs = -10_000L;
+    private Runnable commitFingerRunnable;
 
     private final ServiceConnection serviceConn = new ServiceConnection() {
         @Override
@@ -126,6 +135,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
 
         setContentView(rootLayout);
 
+        fingerGestureState = new FingerGestureState(
+                ViewConfiguration.get(this).getScaledTouchSlop(), 110L);
+        commitFingerRunnable = () -> {
+            if (fingerGestureState.commitPending() == FingerGestureState.Result.START_INK) {
+                beginFingerInk(
+                        fingerGestureState.getDownX(),
+                        fingerGestureState.getDownY(),
+                        fingerGestureState.getDownTimeMs()
+                );
+            }
+        };
+
         hideOverlayRunnable = () -> statsOverlay.setVisibility(View.GONE);
         handler.postDelayed(hideOverlayRunnable, 4000);
 
@@ -151,6 +172,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
                 return handleWheelPointerEvent(event);
             }
             if (isStylusEvent(event)) return handlePenMotionEvent(event);
+            if (isFingerInputEnabled()) return handleFingerTouchEvent(event);
             return gestureDetector.onTouchEvent(event);
         });
         rootLayout.setOnHoverListener((v, event) ->
@@ -203,6 +225,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     }
 
     private boolean handlePenMotionEvent(MotionEvent event) {
+        lastStylusEventMs = SystemClock.uptimeMillis();
+        cancelFingerGestureForStylus();
         int maskedAction = event.getActionMasked();
         boolean terminalAction = maskedAction == MotionEvent.ACTION_UP
                 || maskedAction == MotionEvent.ACTION_POINTER_UP
@@ -295,10 +319,227 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         int pointerIndex = Math.min(event.getActionIndex(), Math.max(0, event.getPointerCount() - 1));
         wheelOverlay.updateSelection(event.getX(pointerIndex), event.getY(pointerIndex));
         int action = event.getActionMasked();
-        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+        if (action == MotionEvent.ACTION_UP) {
             handleWheelTap(false);
         }
         return true;
+    }
+
+    private boolean isFingerInputEnabled() {
+        // Once a finger gesture owns the stream, keep routing every subsequent
+        // event to it until all pointers are released. penInContent becomes true
+        // during ink, so checking auto-mode eligibility first would split a stroke.
+        if (fingerGestureState != null && fingerGestureState.isActive()) return true;
+        if (touchInputMode == TouchInputConfig.MODE_STYLUS_ONLY) return false;
+        if (touchInputMode == TouchInputConfig.MODE_FINGER) return true;
+        return !penInContent && SystemClock.uptimeMillis() - lastStylusEventMs > 1000L;
+    }
+
+    private boolean handleFingerTouchEvent(MotionEvent event) {
+        final int action = event.getActionMasked();
+        final long timeMs = event.getEventTime();
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            fingerPrimaryPointerId = event.getPointerId(0);
+            fingerGestureState.onDown(timeMs, event.getX(0), event.getY(0));
+            handler.removeCallbacks(commitFingerRunnable);
+            handler.postDelayed(commitFingerRunnable, 110L);
+            return true;
+        }
+
+        if (!fingerGestureState.isActive()) return true;
+
+        if (action == MotionEvent.ACTION_POINTER_DOWN) {
+            float[] centroid = touchCentroid(event);
+            FingerGestureState.Result result = fingerGestureState.onAdditionalDown(
+                    event.getPointerCount(), timeMs, centroid[0], centroid[1]);
+            if (fingerGestureState.isChord()) {
+                handler.removeCallbacks(commitFingerRunnable);
+                surfaceView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                showTemporaryMessage("双指：下键 · 松开执行");
+            } else if (result == FingerGestureState.Result.START_INK) {
+                handler.removeCallbacks(commitFingerRunnable);
+                beginFingerInk(fingerGestureState.getDownX(), fingerGestureState.getDownY(),
+                        fingerGestureState.getDownTimeMs());
+                int primaryIndex = event.findPointerIndex(fingerPrimaryPointerId);
+                if (primaryIndex >= 0) moveFingerInk(event.getX(primaryIndex), event.getY(primaryIndex), timeMs);
+            } else if (result == FingerGestureState.Result.CANCELLED) {
+                handler.removeCallbacks(commitFingerRunnable);
+                if (event.getPointerCount() >= 3) {
+                    showTemporaryMessage("三指操作已禁用");
+                }
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_MOVE) {
+            if (fingerGestureState.isChord()) {
+                float[] centroid = touchCentroid(event);
+                if (fingerGestureState.onChordMove(timeMs, centroid[0], centroid[1]) ==
+                        FingerGestureState.Result.CANCELLED) {
+                    showTemporaryMessage("多指手势已取消");
+                }
+                return true;
+            }
+            int primaryIndex = event.findPointerIndex(fingerPrimaryPointerId);
+            if (primaryIndex < 0) return true;
+            FingerGestureState.Result result = fingerGestureState.onPrimaryMove(
+                    timeMs, event.getX(primaryIndex), event.getY(primaryIndex));
+            if (result == FingerGestureState.Result.START_INK) {
+                handler.removeCallbacks(commitFingerRunnable);
+                beginFingerInk(fingerGestureState.getDownX(), fingerGestureState.getDownY(),
+                        fingerGestureState.getDownTimeMs());
+                moveFingerInk(event.getX(primaryIndex), event.getY(primaryIndex), timeMs);
+            } else if (result == FingerGestureState.Result.MOVE_INK) {
+                moveFingerInk(event.getX(primaryIndex), event.getY(primaryIndex), timeMs);
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_UP) {
+            handler.removeCallbacks(commitFingerRunnable);
+            int actionIndex = event.getActionIndex();
+            int liftedId = event.getPointerId(actionIndex);
+            int remainingPointers = event.getPointerCount() - 1;
+            float chordX = fingerGestureState.getChordAnchorX();
+            float chordY = fingerGestureState.getChordAnchorY();
+            FingerGestureState.Result result = liftedId == fingerPrimaryPointerId
+                    ? fingerGestureState.onPrimaryUp(timeMs, remainingPointers)
+                    : fingerGestureState.onOtherPointerUp(timeMs, remainingPointers);
+            handleFingerResult(result, event.getX(actionIndex), event.getY(actionIndex),
+                    chordX, chordY, timeMs);
+            if (remainingPointers == 0) {
+                fingerGestureState.onAllPointersReleased();
+                fingerPrimaryPointerId = -1;
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_CANCEL) {
+            handler.removeCallbacks(commitFingerRunnable);
+            handleFingerResult(fingerGestureState.onCancel(), lastPenParentX, lastPenParentY,
+                    lastPenParentX, lastPenParentY, timeMs);
+            fingerPrimaryPointerId = -1;
+            return true;
+        }
+        return true;
+    }
+
+    private void handleFingerResult(
+            FingerGestureState.Result result,
+            float x,
+            float y,
+            float chordX,
+            float chordY,
+            long timeMs) {
+        switch (result) {
+            case TAP:
+                sendFingerPen(NetworkServer.PEN_ACTION_DOWN, x, y, timeMs);
+                sendFingerPen(NetworkServer.PEN_ACTION_UP, x, y, timeMs + 1L);
+                break;
+            case END_INK:
+                endFingerInk(x, y, timeMs, false);
+                break;
+            case CANCEL_INK:
+                endFingerInk(x, y, timeMs, true);
+                break;
+            case LOWER_BUTTON:
+                applyFingerButtonAnchor(chordX, chordY);
+                handleLowerButtonDown();
+                handleLowerButtonReleased();
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void beginFingerInk(float x, float y, long timeMs) {
+        FingerContactPolicy.Actions actions = FingerContactPolicy.forMode(mouseMode);
+        if (actions.begin == NetworkServer.PEN_ACTION_HOVER_ENTER) {
+            penInContent = sendFingerPen(actions.begin, x, y, timeMs);
+            penDown = false;
+        } else {
+            penDown = sendFingerPen(actions.begin, x, y, timeMs);
+            penInContent = penDown;
+        }
+    }
+
+    private void moveFingerInk(float x, float y, long timeMs) {
+        FingerContactPolicy.Actions actions = FingerContactPolicy.forMode(mouseMode);
+        if (actions.move == NetworkServer.PEN_ACTION_HOVER_MOVE) {
+            if (penInContent) {
+                sendFingerPen(actions.move, x, y, timeMs);
+            } else {
+                penInContent = sendFingerPen(NetworkServer.PEN_ACTION_HOVER_ENTER, x, y, timeMs);
+            }
+        } else if (penDown) {
+            sendFingerPen(actions.move, x, y, timeMs);
+        }
+    }
+
+    private void endFingerInk(float x, float y, long timeMs, boolean cancelled) {
+        if (penDown || penInContent) {
+            int action;
+            if (cancelled) action = NetworkServer.PEN_ACTION_CANCEL;
+            else action = FingerContactPolicy.forMode(mouseMode).end;
+            sendFingerPen(action, x, y, timeMs);
+        }
+        penDown = false;
+        penInContent = false;
+    }
+
+    private boolean sendFingerPen(int action, float parentX, float parentY, long timeMs) {
+        boolean clamp = penDown || penInContent;
+        boolean inside = surfaceView.mapParentPointToNormalized(
+                parentX, parentY, penCoordinates, clamp);
+        if (!inside && !clamp) return false;
+        lastPenParentX = parentX;
+        lastPenParentY = parentY;
+        lastPenX = Math.round(penCoordinates[0] * 65535.0f);
+        lastPenY = Math.round(penCoordinates[1] * 65535.0f);
+        boolean contact = action == NetworkServer.PEN_ACTION_DOWN ||
+                action == NetworkServer.PEN_ACTION_MOVE;
+        int pressure = contact ? Math.round(touchPressurePercent * 655.35f) : 0;
+        return server.sendPenEvent(
+                action,
+                NetworkServer.PEN_TOOL_STYLUS,
+                0,
+                lastPenX,
+                lastPenY,
+                pressure,
+                0,
+                0,
+                timeMs * 1000L
+        );
+    }
+
+    private void applyFingerButtonAnchor(float parentX, float parentY) {
+        lastPenParentX = parentX;
+        lastPenParentY = parentY;
+        if (surfaceView.mapParentPointToNormalized(parentX, parentY, penCoordinates, false)) {
+            lastPenX = Math.round(penCoordinates[0] * 65535.0f);
+            lastPenY = Math.round(penCoordinates[1] * 65535.0f);
+        }
+    }
+
+    private float[] touchCentroid(MotionEvent event) {
+        float x = 0.0f;
+        float y = 0.0f;
+        for (int index = 0; index < event.getPointerCount(); ++index) {
+            x += event.getX(index);
+            y += event.getY(index);
+        }
+        return new float[]{ x / event.getPointerCount(), y / event.getPointerCount() };
+    }
+
+    private void cancelFingerGestureForStylus() {
+        if (fingerGestureState == null || !fingerGestureState.isActive()) return;
+        handler.removeCallbacks(commitFingerRunnable);
+        FingerGestureState.Result result = fingerGestureState.onCancel();
+        if (result == FingerGestureState.Result.CANCEL_INK) {
+            endFingerInk(lastPenParentX, lastPenParentY, SystemClock.uptimeMillis(), true);
+        }
+        fingerPrimaryPointerId = -1;
     }
 
     private void handleWheelTap(boolean stylusGesture) {
@@ -331,37 +572,49 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
 
         if (keyCode == KeyEvent.KEYCODE_PAGE_UP) {
             if (event.getAction() == KeyEvent.ACTION_UP) {
-                if (macroRecording) {
-                    server.sendInputCommand(NetworkServer.INPUT_ACTION_RECORD_CANCEL, lastPenX, lastPenY);
-                    macroRecording = false;
-                    showTemporaryMessage("已取消本次录制");
-                } else {
-                    cancelPenForWheel();
-                    server.sendInputCommand(NetworkServer.INPUT_ACTION_RECORD_START, lastPenX, lastPenY);
-                    macroRecording = true;
-                    showRecordingMessage();
-                }
+                handleUpperButtonReleased();
             }
             return true;
         }
 
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            wheelInteractionState.onLowerDown(macroRecording);
+            handleLowerButtonDown();
             return true;
         }
         if (event.getAction() == KeyEvent.ACTION_UP) {
-            WheelInteractionState.Result result = wheelInteractionState.onLowerUp(macroRecording);
-            if (result == WheelInteractionState.Result.STOP_RECORDING) {
-                server.sendInputCommand(NetworkServer.INPUT_ACTION_RECORD_STOP, lastPenX, lastPenY);
-                macroRecording = false;
-                showTemporaryMessage("录制已结束并保存，可从轮盘回放");
-            } else if (result == WheelInteractionState.Result.SHOW_WHEEL) {
-                cancelPenForWheel();
-                wheelOverlay.showAt(lastPenParentX, lastPenParentY);
-            }
+            handleLowerButtonReleased();
             return true;
         }
         return true;
+    }
+
+    private void handleUpperButtonReleased() {
+        if (macroRecording) {
+            server.sendInputCommand(NetworkServer.INPUT_ACTION_RECORD_CANCEL, lastPenX, lastPenY);
+            macroRecording = false;
+            showTemporaryMessage("已取消本次录制");
+        } else {
+            cancelPenForWheel();
+            server.sendInputCommand(NetworkServer.INPUT_ACTION_RECORD_START, lastPenX, lastPenY);
+            macroRecording = true;
+            showRecordingMessage();
+        }
+    }
+
+    private void handleLowerButtonDown() {
+        wheelInteractionState.onLowerDown(macroRecording);
+    }
+
+    private void handleLowerButtonReleased() {
+        WheelInteractionState.Result result = wheelInteractionState.onLowerUp(macroRecording);
+        if (result == WheelInteractionState.Result.STOP_RECORDING) {
+            server.sendInputCommand(NetworkServer.INPUT_ACTION_RECORD_STOP, lastPenX, lastPenY);
+            macroRecording = false;
+            showTemporaryMessage("录制已结束并保存，可从轮盘回放");
+        } else if (result == WheelInteractionState.Result.SHOW_WHEEL) {
+            cancelPenForWheel();
+            wheelOverlay.showAt(lastPenParentX, lastPenParentY);
+        }
     }
 
     private void cancelPenForWheel() {
@@ -543,6 +796,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
 
     @Override
     protected void onPause() {
+        handler.removeCallbacks(commitFingerRunnable);
+        if (fingerGestureState != null) {
+            fingerGestureState.onCancel();
+            fingerPrimaryPointerId = -1;
+        }
         if (penDown || penInContent) {
             server.sendPenEvent(
                     NetworkServer.PEN_ACTION_CANCEL,
@@ -614,6 +872,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onDisconnected() {
         handler.post(() -> {
+            handler.removeCallbacks(commitFingerRunnable);
+            if (fingerGestureState != null) fingerGestureState.onCancel();
+            fingerPrimaryPointerId = -1;
+            penDown = false;
+            penInContent = false;
             macroRecording = false;
             mouseMode = false;
             eraserMode = false;
@@ -639,6 +902,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
             } else {
                 setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
             }
+        });
+    }
+
+    @Override
+    public void onTouchInputConfig(TouchInputConfig config) {
+        handler.post(() -> {
+            cancelFingerGestureForStylus();
+            touchInputMode = config.mode;
+            touchPressurePercent = config.pressurePercent;
+            String modeLabel = config.mode == TouchInputConfig.MODE_STYLUS_ONLY
+                    ? "仅触控笔"
+                    : config.mode == TouchInputConfig.MODE_FINGER ? "手指模拟笔" : "自动识别";
+            Log.i(TAG, "Touch input config: mode=" + modeLabel
+                    + ", pressure=" + touchPressurePercent + "%");
         });
     }
 
@@ -674,6 +951,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
 
     @Override
     protected void onDestroy() {
+        handler.removeCallbacks(commitFingerRunnable);
         if (serviceConn != null) {
             unbindService(serviceConn);
         }

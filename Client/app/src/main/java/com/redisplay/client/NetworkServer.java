@@ -66,6 +66,7 @@ public class NetworkServer implements Runnable {
         void onConnected(String hostInfo);
         void onDisconnected();
         void onResolutionChanged(int width, int height, int fps);
+        void onTouchInputConfig(TouchInputConfig config);
         void onStatsUpdate(float fps, int bitrateKbps);
         void onWheelConfig(WheelConfig config);
         void onMacroCatalog(MacroCatalog catalog);
@@ -296,6 +297,8 @@ public class NetworkServer implements Runnable {
                         Log.i(TAG, "Config received: " + w + "x" + h + " @" + fps + "Hz");
                         decoder.reconfigure(w, h, fps);
                         if (listener != null) listener.onResolutionChanged(w, h, fps);
+                        if (listener != null) listener.onTouchInputConfig(
+                                TouchInputConfig.fromConfigPayload(buffer, payloadSize));
                     }
                 } else if (packetType == 3) { // Ping / Pong for latency measurement
                     writer.enqueuePong(timestampUs);

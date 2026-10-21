@@ -6,6 +6,7 @@ const path = require('path');
 const projectRoot = path.resolve(__dirname, '..');
 const packageJson = require(path.join(projectRoot, 'package.json'));
 const { resolveHostExePath } = require('../lib/runtime-paths');
+const { normalizeTouchConfig } = require('../lib/touch-config');
 
 assert.strictEqual(
     packageJson.build.portable && packageJson.build.portable.unpackDirName,
@@ -15,6 +16,22 @@ assert.strictEqual(
 assert(
     packageJson.build.files.includes('lib/**/*'),
     'runtime path resolver must be included in app.asar'
+);
+assert.deepStrictEqual(
+    normalizeTouchConfig({ touchInput: 'finger', touchPressure: 120 }),
+    { touchInput: 'finger', touchPressure: 100 },
+    'finger input configuration must clamp pressure before reaching Host'
+);
+assert.deepStrictEqual(
+    normalizeTouchConfig({ touchInput: 'invalid', touchPressure: 'bad' }),
+    { touchInput: 'auto', touchPressure: 55 },
+    'invalid touch configuration must fall back to safe defaults'
+);
+assert(
+    packageJson.build.extraResources.some(item =>
+        item.to === 'Client/ReDisplay.apk' && /Client[\\/]ReDisplay\.apk$/.test(item.from)
+    ),
+    'the current Android client APK must be packaged with the desktop app'
 );
 assert(
     packageJson.build.extraResources.some(item =>

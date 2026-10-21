@@ -34,6 +34,15 @@ struct ConfigPayload {
     uint32_t width;
     uint32_t height;
     uint32_t fps;
+    uint8_t touch_input_mode;
+    uint8_t touch_pressure_percent;
+    uint16_t reserved;
+};
+
+enum TouchInputMode : uint8_t {
+    TOUCH_INPUT_AUTO = 0,
+    TOUCH_INPUT_STYLUS_ONLY = 1,
+    TOUCH_INPUT_FINGER = 2
 };
 
 enum PenAction : uint8_t {

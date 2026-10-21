@@ -448,6 +448,17 @@ body {
     gap: 8px;
 }
 
+.touch-input-settings {
+    padding-top: 12px;
+    border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.setting-help {
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--md-sys-color-outline);
+}
+
 .label-row {
     display: flex;
     align-items: center;

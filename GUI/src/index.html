@@ -18,7 +18,7 @@
                 <img src="../assets/icon.png" width="22" height="22" style="border-radius: 5px; display: block;" alt="ReDisplay">
             </div>
             <span class="app-title">ReDisplay</span>
-            <span class="version-tag">v1.7.2</span>
+            <span class="version-tag">v1.8.3</span>
             <div id="status-pill" class="status-badge status-idle">
                 <span class="badge-dot"></span>
                 <span id="status-text">待机就绪</span>
@@ -219,6 +219,24 @@
                         <option value="1080x1920">1080 × 1920 (1080P 竖屏)</option>
                         <option value="1920x1080">1920 × 1080 (1080P 横屏)</option>
                     </select>
+                </div>
+
+                <div class="form-group touch-input-settings">
+                    <div class="label-row">
+                        <label>平板触控输入</label>
+                        <span class="preset-mode-tag" id="val-touch-mode">自动识别</span>
+                    </div>
+                    <div class="segmented-control" id="seg-touch-input">
+                        <button class="seg-btn active" data-touch-input="auto">自动</button>
+                        <button class="seg-btn" data-touch-input="stylus">仅触控笔</button>
+                        <button class="seg-btn" data-touch-input="finger">手指模拟笔</button>
+                    </div>
+                    <span class="setting-help">一指为笔尖，双指为下键；三指及以上不映射任何操作。双指动作在松开时执行，不响应长按。</span>
+                    <div class="label-row">
+                        <label for="slider-touch-pressure">手指模拟压力</label>
+                        <span class="slider-val" id="val-touch-pressure">55%</span>
+                    </div>
+                    <input type="range" id="slider-touch-pressure" class="md3-slider" min="10" max="100" step="5" value="55">
                 </div>
 
                 <!-- Switch: Auto-reconnect & Persistence -->

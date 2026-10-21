@@ -81,6 +81,17 @@ if %errorlevel% neq 0 exit /b 1
 del "%HOST_DIR%input_mode_test.exe" >nul 2>&1
 del "%HOST_DIR%input_mode_test.obj" >nul 2>&1
 
+echo Running touch config protocol regression tests...
+cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
+    /I "%SRC_DIR%" ^
+    "%HOST_DIR%tests\touch_config_protocol_test.cpp" ^
+    /Fe:"%HOST_DIR%touch_config_protocol_test.exe"
+if %errorlevel% neq 0 exit /b 1
+"%HOST_DIR%touch_config_protocol_test.exe"
+if %errorlevel% neq 0 exit /b 1
+del "%HOST_DIR%touch_config_protocol_test.exe" >nul 2>&1
+del "%HOST_DIR%touch_config_protocol_test.obj" >nul 2>&1
+
 echo Running pen macro recorder regression tests...
 cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
     /I "%SRC_DIR%" ^

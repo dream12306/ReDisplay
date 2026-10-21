@@ -177,6 +177,8 @@ int main(int argc, char* argv[]) {
     int prefDisplayIdx = -1;
     std::string prefSerial = "";
     std::string bufferMode = "lowlatency";
+    uint8_t touchInputMode = TOUCH_INPUT_AUTO;
+    int touchPressurePercent = 55;
     std::string wheelConfigPath;
     std::string macroDirectory;
     std::string macroLibraryPath;
@@ -243,6 +245,13 @@ int main(int argc, char* argv[]) {
             targetHeight = atoi(argv[++i]);
         } else if (arg == "--buffer-mode" && i + 1 < argc) {
             bufferMode = argv[++i];
+        } else if (arg == "--touch-input" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "stylus") touchInputMode = TOUCH_INPUT_STYLUS_ONLY;
+            else if (mode == "finger") touchInputMode = TOUCH_INPUT_FINGER;
+            else touchInputMode = TOUCH_INPUT_AUTO;
+        } else if (arg == "--touch-pressure" && i + 1 < argc) {
+            touchPressurePercent = (std::max)(10, (std::min)(100, atoi(argv[++i])));
         } else if (arg == "--serial" && i + 1 < argc) {
             prefSerial = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
@@ -485,6 +494,9 @@ int main(int argc, char* argv[]) {
         cfgPayload.width = htonl(targetWidth);
         cfgPayload.height = htonl(targetHeight);
         cfgPayload.fps = htonl(targetFps);
+        cfgPayload.touch_input_mode = touchInputMode;
+        cfgPayload.touch_pressure_percent = static_cast<uint8_t>(touchPressurePercent);
+        cfgPayload.reserved = 0;
 
         if (!SendAll(sock, &cfgHeader, sizeof(cfgHeader)) ||
             !SendAll(sock, &cfgPayload, sizeof(cfgPayload))) {
