@@ -15,6 +15,7 @@ import android.util.Log;
 import android.view.Choreographer;
 import android.view.Display;
 import android.view.GestureDetector;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -38,6 +39,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     private GestureDetector gestureDetector;
     private Runnable hideOverlayRunnable;
     private int negotiatedFps = 120;
+    private boolean penInContent = false;
+    private boolean penDown = false;
+    private int lastPenX = 0;
+    private int lastPenY = 0;
+    private final float[] penCoordinates = new float[2];
 
     private final ServiceConnection serviceConn = new ServiceConnection() {
         @Override
@@ -95,7 +101,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         statsOverlay.setTextSize(13);
         statsOverlay.setPadding(30, 30, 30, 30);
         statsOverlay.setBackgroundColor(Color.parseColor("#80000000"));
-        statsOverlay.setText("ReDisplay 等待主机连接...\n端口: 27183 | 双击屏幕切换全屏/保持比例");
+        statsOverlay.setText("ReDisplay 等待主机连接...\n小米手写笔: Windows Ink | 手指双击切换画面模式");
         statsOverlay.setVisibility(View.VISIBLE);
         FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -125,7 +131,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
             }
         });
 
-        rootLayout.setOnTouchListener((v, event) -> gestureDetector.onTouchEvent(event));
+        rootLayout.setOnTouchListener((v, event) -> {
+            if (isStylusEvent(event)) return handlePenMotionEvent(event);
+            return gestureDetector.onTouchEvent(event);
+        });
+        rootLayout.setOnHoverListener((v, event) ->
+                isStylusEvent(event) && handlePenMotionEvent(event));
 
         // Bind Foreground Service
         Intent intent = new Intent(this, DisplayService.class);
@@ -148,7 +159,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
                 if (now - lastVsyncLog >= 1000) {
                     double elapsedSec = (now - lastVsyncLog) / 1000.0;
                     float vsyncFps = (float) (vSyncCount / elapsedSec);
-                    Display d = getDisplay();
+                    Display d = getCurrentDisplay();
                     float modeFps = (d != null && d.getMode() != null) ? d.getMode().getRefreshRate() : 0.0f;
                     Log.i(TAG, "[Stage 7 Choreographer] VSync: " + String.format(java.util.Locale.US, "%.1f", vsyncFps) + " Hz | Active Display Mode: " + modeFps + " Hz");
                     vSyncCount = 0;
@@ -157,6 +168,129 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
                 Choreographer.getInstance().postFrameCallback(this);
             }
         });
+    }
+
+    private boolean isStylusEvent(MotionEvent event) {
+        if ((event.getSource() & InputDevice.SOURCE_STYLUS) == InputDevice.SOURCE_STYLUS) {
+            return true;
+        }
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            int toolType = event.getToolType(i);
+            if (toolType == MotionEvent.TOOL_TYPE_STYLUS
+                    || toolType == MotionEvent.TOOL_TYPE_ERASER) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean handlePenMotionEvent(MotionEvent event) {
+        int maskedAction = event.getActionMasked();
+        int pointerIndex = Math.min(event.getActionIndex(), Math.max(0, event.getPointerCount() - 1));
+        boolean clampToContent = penDown && maskedAction == MotionEvent.ACTION_MOVE;
+        boolean inside = surfaceView.mapParentPointToNormalized(
+                event.getX(pointerIndex),
+                event.getY(pointerIndex),
+                penCoordinates,
+                clampToContent
+        );
+
+        if (inside || clampToContent) {
+            lastPenX = Math.round(penCoordinates[0] * 65535.0f);
+            lastPenY = Math.round(penCoordinates[1] * 65535.0f);
+        }
+
+        int action;
+        switch (maskedAction) {
+            case MotionEvent.ACTION_HOVER_ENTER:
+                if (!inside) return true;
+                action = NetworkServer.PEN_ACTION_HOVER_ENTER;
+                penInContent = true;
+                break;
+            case MotionEvent.ACTION_HOVER_MOVE:
+                if (!inside) {
+                    if (penInContent) {
+                        sendPenSample(event, pointerIndex, NetworkServer.PEN_ACTION_HOVER_EXIT);
+                        penInContent = false;
+                    }
+                    return true;
+                }
+                action = penInContent
+                        ? NetworkServer.PEN_ACTION_HOVER_MOVE
+                        : NetworkServer.PEN_ACTION_HOVER_ENTER;
+                penInContent = true;
+                break;
+            case MotionEvent.ACTION_HOVER_EXIT:
+                if (!penInContent) return true;
+                action = NetworkServer.PEN_ACTION_HOVER_EXIT;
+                penInContent = false;
+                break;
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (!inside) return true;
+                action = NetworkServer.PEN_ACTION_DOWN;
+                penInContent = true;
+                penDown = true;
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (!penDown) return true;
+                action = NetworkServer.PEN_ACTION_MOVE;
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                if (!penDown) return true;
+                action = NetworkServer.PEN_ACTION_UP;
+                penDown = false;
+                penInContent = inside;
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                if (!penDown && !penInContent) return true;
+                action = NetworkServer.PEN_ACTION_CANCEL;
+                penDown = false;
+                penInContent = false;
+                break;
+            default:
+                return true;
+        }
+
+        sendPenSample(event, pointerIndex, action);
+        return true;
+    }
+
+    private void sendPenSample(MotionEvent event, int pointerIndex, int action) {
+        int tool = event.getToolType(pointerIndex) == MotionEvent.TOOL_TYPE_ERASER
+                ? NetworkServer.PEN_TOOL_ERASER
+                : NetworkServer.PEN_TOOL_STYLUS;
+        int buttons = 0;
+        if ((event.getButtonState() & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0) {
+            buttons |= NetworkServer.PEN_BUTTON_BARREL;
+        }
+        if ((event.getButtonState() & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0) {
+            buttons |= NetworkServer.PEN_BUTTON_SECONDARY;
+        }
+
+        float pressure = Math.max(0.0f, Math.min(1.0f, event.getPressure(pointerIndex)));
+        float tiltRadians = event.getAxisValue(MotionEvent.AXIS_TILT, pointerIndex);
+        float orientation = event.getOrientation(pointerIndex);
+        double tiltDegrees = Math.toDegrees(tiltRadians);
+        int tiltXHundredths = (int) Math.round(
+                Math.sin(orientation) * tiltDegrees * 100.0
+        );
+        int tiltYHundredths = (int) Math.round(
+                -Math.cos(orientation) * tiltDegrees * 100.0
+        );
+
+        server.sendPenEvent(
+                action,
+                tool,
+                buttons,
+                lastPenX,
+                lastPenY,
+                Math.round(pressure * 65535.0f),
+                tiltXHundredths,
+                tiltYHundredths,
+                event.getEventTime() * 1000L
+        );
     }
 
     private void applyPreferredRefreshRate(int requestedFps) {
@@ -202,6 +336,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         }
     }
 
+    @SuppressWarnings("deprecation")
+    private Display getCurrentDisplay() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return getDisplay();
+        }
+        return getWindowManager().getDefaultDisplay();
+    }
+
     private void applyFullscreenImmersive() {
         Window window = getWindow();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -234,6 +376,26 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     protected void onResume() {
         super.onResume();
         applyFullscreenImmersive();
+    }
+
+    @Override
+    protected void onPause() {
+        if (penDown || penInContent) {
+            server.sendPenEvent(
+                    NetworkServer.PEN_ACTION_CANCEL,
+                    NetworkServer.PEN_TOOL_STYLUS,
+                    0,
+                    lastPenX,
+                    lastPenY,
+                    0,
+                    0,
+                    0,
+                    android.os.SystemClock.uptimeMillis() * 1000L
+            );
+            penDown = false;
+            penInContent = false;
+        }
+        super.onPause();
     }
 
     private void toggleStatsOverlay() {
@@ -274,7 +436,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onConnected(String hostInfo) {
         handler.post(() -> {
-            statsOverlay.setText("已连接: " + hostInfo + "\n接收视频流中 (120Hz)...");
+            statsOverlay.setText("已连接: " + hostInfo + "\nWindows Ink 已启用 · 小米手写笔可直接书写");
             statsOverlay.setVisibility(View.VISIBLE);
             handler.removeCallbacks(hideOverlayRunnable);
             handler.postDelayed(hideOverlayRunnable, 2500);
@@ -313,7 +475,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         handler.post(() -> {
             if (statsOverlay.getVisibility() == View.VISIBLE) {
                 statsOverlay.setText(String.format(
-                        "ReDisplay [10Gbps USB 有线链路]\n帧率: %.1f FPS | 码率: %.1f Mbps\n缩放: %s (双击切换)",
+                        "ReDisplay [USB 有线链路]\n帧率: %.1f FPS | 码率: %.1f Mbps\n缩放: %s | 小米笔: Windows Ink",
                         fps,
                         bitrateKbps / 1000.0f,
                         surfaceView.getScaleMode().name()

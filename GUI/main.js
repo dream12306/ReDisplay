@@ -23,6 +23,7 @@ let activeStreamDeviceName = '';
 let activeStreamSerial = '';
 let hasShownTrayTip = false;
 let lastTrayUpdateTime = 0;
+const PACKAGED_CLIENT_VERSION_CODE = 4;
 
 function resourcePath(...parts) {
     return path.join(process.resourcesPath, ...parts);
@@ -374,11 +375,19 @@ function createTray() {
 // 1. Client APK Check & Installation
 function checkClientInstalled(serial) {
     const adb = getAdbPath();
-    const cmd = serial ? `"${adb}" -s ${serial} shell pm path com.redisplay.client` : `"${adb}" shell pm path com.redisplay.client`;
+    const deviceArgs = serial ? ['-s', serial] : [];
+    const args = [...deviceArgs, 'shell', 'dumpsys', 'package', 'com.redisplay.client'];
     return new Promise((resolve) => {
-        exec(cmd, (err, stdout) => {
-            const installed = !err && stdout && stdout.includes('package:');
-            resolve({ installed });
+        execFile(adb, args, (err, stdout) => {
+            const match = !err && stdout ? stdout.match(/\bversionCode=(\d+)/) : null;
+            const versionCode = match ? parseInt(match[1], 10) : 0;
+            const installed = versionCode > 0;
+            resolve({
+                installed,
+                versionCode,
+                requiredVersionCode: PACKAGED_CLIENT_VERSION_CODE,
+                outdated: installed && versionCode < PACKAGED_CLIENT_VERSION_CODE
+            });
         });
     });
 }
@@ -559,7 +568,8 @@ async function startHostProcess(config) {
     updateTrayMenu();
     const exePath = getHostExePath();
 
-    // Auto-check and auto-install client APK if not installed
+    // Auto-check and auto-install/update the client APK. The pen protocol was
+    // introduced in v4, so merely finding the package is not sufficient.
     if (config.serial) {
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('stream-event', {
@@ -569,12 +579,14 @@ async function startHostProcess(config) {
             });
         }
         const checkRes = await checkClientInstalled(config.serial);
-        if (!checkRes.installed) {
+        if (!checkRes.installed || checkRes.outdated) {
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('stream-event', {
                     type: 'state',
                     status: 'connecting',
-                    message: '客户端未安装，正在自动向设备部署 ReDisplay.apk...'
+                    message: checkRes.outdated
+                        ? '检测到旧版客户端，正在升级 ReDisplay.apk...'
+                        : '客户端未安装，正在自动向设备部署 ReDisplay.apk...'
                 });
             }
             const installRes = await installClientApk(config.serial);

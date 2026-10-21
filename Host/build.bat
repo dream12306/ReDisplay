@@ -59,6 +59,17 @@ del "%HOST_DIR%adb_path_test.exe" >nul 2>&1
 del "%HOST_DIR%adb_path_test.obj" >nul 2>&1
 del "%HOST_DIR%adb.obj" >nul 2>&1
 
+echo Running pen input mapping regression tests...
+cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
+    /I "%SRC_DIR%" ^
+    "%HOST_DIR%tests\pen_input_math_test.cpp" ^
+    /Fe:"%HOST_DIR%pen_input_math_test.exe"
+if %errorlevel% neq 0 exit /b 1
+"%HOST_DIR%pen_input_math_test.exe"
+if %errorlevel% neq 0 exit /b 1
+del "%HOST_DIR%pen_input_math_test.exe" >nul 2>&1
+del "%HOST_DIR%pen_input_math_test.obj" >nul 2>&1
+
 echo Compiling C++20 sources with MSVC optimizations (/O2)...
 cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
     /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS ^
@@ -66,6 +77,7 @@ cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
     "%SRC_DIR%\main.cpp" ^
     "%SRC_DIR%\adb.cpp" ^
     "%SRC_DIR%\display_manager.cpp" ^
+    "%SRC_DIR%\pen_input.cpp" ^
     "%SRC_DIR%\encoder.cpp" ^
     "%SRC_DIR%\capture.cpp" ^
     /link /OUT:"%HOST_DIR%ReDisplayHost.exe" ^

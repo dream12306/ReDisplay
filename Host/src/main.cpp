@@ -22,6 +22,7 @@
 #include "encoder.h"
 #include "capture.h"
 #include "bounded_frame_queue.h"
+#include "pen_input.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -265,7 +266,7 @@ int main(int argc, char* argv[]) {
     if (!isGui) {
         std::cout << "============================================================" << std::endl;
         std::cout << "  ReDisplay: Ultra-Low Latency Wired Secondary Display Host" << std::endl;
-        std::cout << "  Target: Samsung Galaxy Tab S9+ (1752x2800 @ 120Hz)" << std::endl;
+        std::cout << "  Target: Android tablet display + Windows Ink pen bridge" << std::endl;
         std::cout << "============================================================" << std::endl;
     }
 
@@ -513,6 +514,19 @@ int main(int argc, char* argv[]) {
         AsyncNetworkSender asyncSender(sock, connectionAlive, frameCount, totalBytes, droppedFrames, maxQueueSize);
         asyncSender.Start();
 
+        // Reverse input channel. Pen packets travel Android -> Host on the
+        // receive half of the same full-duplex TCP connection and are injected
+        // independently from capture/encode/video transmission.
+        PenInputReceiver penInputReceiver(
+            sock,
+            connectionAlive,
+            disp.rect.left,
+            disp.rect.top,
+            targetWidth,
+            targetHeight
+        );
+        penInputReceiver.Start();
+
         // Frame Callback: NVENC encode runs at ~3.2ms, packets queued immediately
         ScreenCapture capture;
         bool captureOk = capture.Initialize(pD3DDevice, disp.hMonitor, targetFps, [&](ID3D11Texture2D* pTexture, int w, int h) {
@@ -570,6 +584,7 @@ int main(int argc, char* argv[]) {
             }
             capture.Stop();
             asyncSender.Stop();
+            penInputReceiver.Stop();
             encoder.Destroy();
             pD3DContext->Release();
             pD3DDevice->Release();
@@ -655,17 +670,19 @@ int main(int argc, char* argv[]) {
                           << ",\"frames\":" << currFrames
                           << ",\"dropped\":" << currDropped
                           << ",\"bytes\":" << currBytes
+                          << ",\"penEvents\":" << penInputReceiver.GetInjectedEventCount()
                           << ",\"device\":\"" << chosenModel << "\"}" << std::endl;
             } else {
                 std::cout << "\r[Stage 2 WGC] " << std::fixed << std::setprecision(1) << wgcFps << " FPS | "
                           << "[Stage 3 NVENC] " << fps << " FPS (" << std::setprecision(2) << avgEncodeMs << " ms) | "
                           << "[Stage 4 Host TCP] " << std::setprecision(1) << fps << " FPS (" << mbps << " Mbps) | "
-                          << "Drop: " << currDropped << "    " << std::flush;
+                          << "Drop: " << currDropped << " | Ink: " << penInputReceiver.GetInjectedEventCount() << "    " << std::flush;
             }
         }
 
         capture.Stop();
         asyncSender.Stop();
+        penInputReceiver.Stop();
         encoder.Destroy();
         pD3DContext->Release();
         pD3DDevice->Release();

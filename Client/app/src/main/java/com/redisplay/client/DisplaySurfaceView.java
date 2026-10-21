@@ -40,6 +40,33 @@ public class DisplaySurfaceView extends SurfaceView {
         return scaleMode;
     }
 
+    /**
+     * Converts coordinates from the parent FrameLayout into normalized video
+     * coordinates. FIT black bars are rejected unless clampToContent is true;
+     * FILL crop offsets are naturally accounted for by this view's bounds.
+     */
+    public boolean mapParentPointToNormalized(
+            float parentX,
+            float parentY,
+            float[] result,
+            boolean clampToContent) {
+        if (result == null || result.length < 2 || getWidth() <= 0 || getHeight() <= 0) {
+            return false;
+        }
+
+        float localX = parentX - getLeft();
+        float localY = parentY - getTop();
+        boolean inside = localX >= 0.0f && localX <= getWidth()
+                && localY >= 0.0f && localY <= getHeight();
+        if (!inside && !clampToContent) return false;
+
+        localX = Math.max(0.0f, Math.min(getWidth() - 1.0f, localX));
+        localY = Math.max(0.0f, Math.min(getHeight() - 1.0f, localY));
+        result[0] = getWidth() > 1 ? localX / (getWidth() - 1.0f) : 0.0f;
+        result[1] = getHeight() > 1 ? localY / (getHeight() - 1.0f) : 0.0f;
+        return inside;
+    }
+
     public ScaleMode toggleScaleMode() {
         if (scaleMode == ScaleMode.FIT) {
             scaleMode = ScaleMode.FILL;

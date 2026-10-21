@@ -171,14 +171,20 @@ document.addEventListener('DOMContentLoaded', () => {
         // Check if APK is installed
         try {
             const checkRes = await window.api.checkClientInstalled(serial);
-            isClientInstalled = checkRes.installed;
+            isClientInstalled = checkRes.installed && !checkRes.outdated;
             if (isClientInstalled) {
                 dotApk.className = 'status-dot status-dot-online';
                 valApk.textContent = '已就绪';
                 btnStatusApk.classList.add('hidden');
+            } else if (checkRes.outdated) {
+                dotApk.className = 'status-dot status-dot-warning';
+                valApk.textContent = '需要升级';
+                btnStatusApk.textContent = '升级';
+                btnStatusApk.classList.remove('hidden');
             } else {
                 dotApk.className = 'status-dot status-dot-warning';
                 valApk.textContent = '未安装';
+                btnStatusApk.textContent = '安装';
                 btnStatusApk.classList.remove('hidden');
             }
         } catch (e) {
