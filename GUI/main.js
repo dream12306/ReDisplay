@@ -3,8 +3,10 @@ const path = require('path');
 const { spawn, execFile, exec, execSync } = require('child_process');
 const readline = require('readline');
 const fs = require('fs');
+const net = require('net');
 const { resolveHostExePath } = require('./lib/runtime-paths');
 const { normalizeTouchConfig } = require('./lib/touch-config');
+const { normalizeConnectionConfig, isValidIpv4 } = require('./lib/connection-config');
 
 let mainWindow = null;
 let tray = null;
@@ -19,7 +21,10 @@ let currentConfig = {
     bufferMode: 'lowlatency',
     orientation: 'portrait',
     touchInput: 'auto',
-    touchPressure: 55
+    touchPressure: 55,
+    transport: 'usb',
+    wirelessAddress: '',
+    wirelessPort: 27183
 };
 let latestStats = { fps: 0, mbps: 0, encodeMs: 0, dropped: 0, frames: 0 };
 let streamStatus = 'idle'; // 'idle', 'connecting', 'streaming'
@@ -27,7 +32,17 @@ let activeStreamDeviceName = '';
 let activeStreamSerial = '';
 let hasShownTrayTip = false;
 let lastTrayUpdateTime = 0;
-const PACKAGED_CLIENT_VERSION_CODE = 12;
+const PACKAGED_CLIENT_VERSION_CODE = 13;
+
+function localizeHostMessage(message) {
+    if (String(message).startsWith('NVIDIA GPU unavailable')) {
+        return 'NVIDIA 独显当前不可用。请退出 Eco/仅核显模式，切换到标准/混合/独显模式后重启 Windows。';
+    }
+    if (String(message).startsWith('NVENC initialization failed')) {
+        return 'NVENC 初始化失败，请检查 NVIDIA 驱动和电脑的显卡模式。';
+    }
+    return message;
+}
 
 const WHEEL_ACTIONS = Object.freeze({
     none: 0,
@@ -85,8 +100,52 @@ function wheelPaths() {
         macros: path.join(root, 'macros'),
         macroLibraryJson: path.join(root, 'macro-library.json'),
         macroLibraryBinary: path.join(root, 'macro-library.bin'),
-        touchConfigJson: path.join(root, 'touch-input.json')
+        touchConfigJson: path.join(root, 'touch-input.json'),
+        connectionConfigJson: path.join(root, 'connection.json')
     };
+}
+
+function loadConnectionConfig() {
+    const configPath = wheelPaths().connectionConfigJson;
+    try {
+        return normalizeConnectionConfig(JSON.parse(fs.readFileSync(configPath, 'utf8')));
+    } catch (error) {
+        return normalizeConnectionConfig();
+    }
+}
+
+function saveConnectionConfig(config) {
+    const paths = wheelPaths();
+    const normalized = normalizeConnectionConfig(config);
+    fs.mkdirSync(paths.root, { recursive: true });
+    fs.writeFileSync(paths.connectionConfigJson, JSON.stringify(normalized, null, 2), 'utf8');
+    currentConfig = { ...currentConfig, ...normalized };
+    return normalized;
+}
+
+function testWirelessConnection(config) {
+    const normalized = normalizeConnectionConfig({ ...config, transport: 'wifi' });
+    if (!isValidIpv4(normalized.wirelessAddress)) {
+        return Promise.resolve({ success: false, error: '请输入有效的平板 IPv4 地址' });
+    }
+    const started = Date.now();
+    return new Promise(resolve => {
+        const socket = net.createConnection({
+            host: normalized.wirelessAddress,
+            port: normalized.wirelessPort
+        });
+        let completed = false;
+        const finish = result => {
+            if (completed) return;
+            completed = true;
+            socket.destroy();
+            resolve(result);
+        };
+        socket.setTimeout(2000);
+        socket.once('connect', () => finish({ success: true, latencyMs: Date.now() - started }));
+        socket.once('timeout', () => finish({ success: false, error: '连接超时，请确认平板已打开 ReDisplay' }));
+        socket.once('error', error => finish({ success: false, error: error.message }));
+    });
 }
 
 function loadTouchConfig() {
@@ -936,11 +995,17 @@ function manageDriver(action) {
 // 5. Host Process Management (100% Invisible, No Console Window)
 async function startHostProcess(config) {
     if (hostProcess) {
-        try { hostProcess.kill('SIGINT'); } catch (e) {}
+        const previousProcess = hostProcess;
         hostProcess = null;
+        try { previousProcess.kill('SIGINT'); } catch (e) {}
     }
 
     streamStatus = 'connecting';
+    const connectionConfig = normalizeConnectionConfig({ ...currentConfig, ...config });
+    config = { ...config, ...connectionConfig };
+    if (config.transport === 'wifi' && !isValidIpv4(config.wirelessAddress)) {
+        return { success: false, error: '请输入平板显示的有效 Wi‑Fi IPv4 地址' };
+    }
     currentConfig = { ...currentConfig, ...config };
     updateTrayMenu();
     const exePath = getHostExePath();
@@ -953,7 +1018,7 @@ async function startHostProcess(config) {
 
     // Auto-check and auto-install/update the client APK. The pen protocol was
     // introduced in v4, so merely finding the package is not sufficient.
-    if (config.serial) {
+    if (config.transport === 'usb' && config.serial) {
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('stream-event', {
                 type: 'state',
@@ -1024,26 +1089,29 @@ async function startHostProcess(config) {
     if (config.serial) {
         args.push('--serial', String(config.serial));
     }
-    if (config.port) {
-        args.push('--port', String(config.port));
-    }
+    args.push('--transport', config.transport);
+    if (config.transport === 'wifi') args.push('--address', config.wirelessAddress);
+    args.push('--port', String(config.transport === 'wifi' ? config.wirelessPort : (config.port || 27183)));
 
     activeStreamSerial = config.serial || '';
     console.log('[Host] Spawning silently:', exePath, args.join(' '));
 
     try {
-        hostProcess = spawn(exePath, args, {
+        const child = spawn(exePath, args, {
             cwd: path.dirname(exePath),
             windowsHide: true,
             stdio: ['pipe', 'pipe', 'pipe']
         });
+        hostProcess = child;
+        let reportedError = '';
 
         const rl = readline.createInterface({
-            input: hostProcess.stdout,
+            input: child.stdout,
             terminal: false
         });
 
         rl.on('line', (line) => {
+            if (hostProcess !== child) return;
             const trimmed = line.trim();
             if (!trimmed) return;
             try {
@@ -1054,6 +1122,11 @@ async function startHostProcess(config) {
                         updateTrayMenu();
                     } else if (data.status === 'connecting' || data.status === 'launching_app') {
                         streamStatus = 'connecting';
+                        updateTrayMenu();
+                    } else if (data.status === 'error') {
+                        data.message = localizeHostMessage(data.message || 'Host 服务初始化失败');
+                        reportedError = data.message;
+                        streamStatus = 'error';
                         updateTrayMenu();
                     }
                 } else if (data.type === 'device_selected') {
@@ -1082,23 +1155,27 @@ async function startHostProcess(config) {
             }
         });
 
-        hostProcess.stderr.on('data', (data) => {
+        child.stderr.on('data', (data) => {
             console.error('[Host stderr]', data.toString());
         });
 
-        hostProcess.on('exit', (code, signal) => {
+        child.on('exit', (code, signal) => {
             console.log(`[Host] Process exited with code ${code}`);
+            if (hostProcess !== child) return;
             hostProcess = null;
-            streamStatus = 'idle';
+            streamStatus = reportedError ? 'error' : 'idle';
             latestStats = { fps: 0, mbps: 0, encodeMs: 0, dropped: 0, frames: 0 };
             updateTrayMenu();
             if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('stream-status', { status: 'stopped', code });
+                mainWindow.webContents.send('stream-status', reportedError
+                    ? { status: 'error', message: reportedError, code }
+                    : { status: 'stopped', code });
             }
         });
 
-        hostProcess.on('error', (err) => {
+        child.on('error', (err) => {
             console.error('[Host] Failed to spawn:', err);
+            if (hostProcess !== child) return;
             hostProcess = null;
             streamStatus = 'idle';
             latestStats = { fps: 0, mbps: 0, encodeMs: 0, dropped: 0, frames: 0 };
@@ -1116,7 +1193,7 @@ async function startHostProcess(config) {
     }
 }
 
-function stopHostProcess(serial) {
+function stopHostProcess(config) {
     console.log('[Host] Stopping secondary display stream...');
     if (hostProcess) {
         try { hostProcess.kill('SIGINT'); } catch (e) {}
@@ -1131,13 +1208,15 @@ function stopHostProcess(serial) {
     exec('taskkill /F /IM ReDisplayHost.exe >nul 2>&1');
 
     // Clean up channel and exit Android client application
-    const adbPath = getAdbPath();
-    const targetSerial = serial || activeStreamSerial || '';
-    const adbCmd = targetSerial ? `"${adbPath}" -s ${targetSerial}` : `"${adbPath}"`;
-
-    exec(`${adbCmd} forward --remove tcp:27183 >nul 2>&1`);
-    exec(`${adbCmd} shell am force-stop com.redisplay.client >nul 2>&1`);
-    console.log('[Host] Stream channel cleared and Android client stopped.');
+    const stopConfig = (config && typeof config === 'object') ? config : { serial: config };
+    if ((stopConfig.transport || currentConfig.transport) !== 'wifi') {
+        const adbPath = getAdbPath();
+        const targetSerial = stopConfig.serial || activeStreamSerial || '';
+        const adbCmd = targetSerial ? `"${adbPath}" -s ${targetSerial}` : `"${adbPath}"`;
+        exec(`${adbCmd} forward --remove tcp:27183 >nul 2>&1`);
+        exec(`${adbCmd} shell am force-stop com.redisplay.client >nul 2>&1`);
+    }
+    console.log('[Host] Stream channel cleared.');
 
     if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('stream-status', { status: 'stopped' });
@@ -1145,14 +1224,14 @@ function stopHostProcess(serial) {
     return { success: true };
 }
 
-let isRestarting = false;
+let restartPromise = null;
 
-async function restartHostProcess(config) {
-    if (isRestarting) {
-        console.log('[Host] Restart already in progress, waiting...');
+function restartHostProcess(config) {
+    if (restartPromise) {
+        console.log('[Host] Restart already in progress; reusing the pending restart.');
+        return restartPromise;
     }
-    isRestarting = true;
-    try {
+    restartPromise = (async () => {
         console.log('[Host] Performing atomic hot-restart of secondary display...');
         
         // 1. Terminate running host process
@@ -1171,10 +1250,11 @@ async function restartHostProcess(config) {
         await new Promise(r => setTimeout(r, 250));
 
         // 3. Start new host process with new parameters
-        return await startHostProcess(config);
-    } finally {
-        isRestarting = false;
-    }
+        return startHostProcess(config);
+    })().finally(() => {
+        restartPromise = null;
+    });
+    return restartPromise;
 }
 
 // Single instance enforcement
@@ -1191,7 +1271,7 @@ if (!gotTheLock) {
     });
 
     app.whenReady().then(() => {
-        currentConfig = { ...currentConfig, ...loadTouchConfig() };
+        currentConfig = { ...currentConfig, ...loadTouchConfig(), ...loadConnectionConfig() };
         createWindow();
         createTray();
 
@@ -1213,11 +1293,20 @@ if (!gotTheLock) {
 
         // Stream IPC
         ipcMain.handle('start-stream', (event, config) => startHostProcess(config));
-        ipcMain.handle('stop-stream', (event, serial) => stopHostProcess(serial));
+        ipcMain.handle('stop-stream', (event, config) => stopHostProcess(config));
         ipcMain.handle('restart-stream', async (event, config) => restartHostProcess(config));
         ipcMain.handle('get-service-status', () => ({ running: !!hostProcess }));
         ipcMain.handle('get-wheel-config', () => loadWheelConfig());
         ipcMain.handle('get-touch-config', () => loadTouchConfig());
+        ipcMain.handle('get-connection-config', () => loadConnectionConfig());
+        ipcMain.handle('save-connection-config', (event, config) => {
+            try {
+                return { success: true, config: saveConnectionConfig(config) };
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        });
+        ipcMain.handle('test-wireless-connection', (event, config) => testWirelessConnection(config));
         ipcMain.handle('save-touch-config', async (event, config) => {
             try {
                 const saved = saveTouchConfig(config);
@@ -1333,21 +1422,17 @@ if (!gotTheLock) {
             const exePath = getHostExePath();
             if (!exePath) return { gpuName: 'ReDisplayHost.exe 缺失' };
             return new Promise((resolve) => {
-                execFile(exePath, ['--list-displays'], { cwd: path.dirname(exePath) }, (err, stdout) => {
-                    if (!err && stdout) {
+                execFile(exePath, ['--gpu-info'], { cwd: path.dirname(exePath) }, (err, stdout) => {
+                    if (stdout) {
                         try {
                             const data = JSON.parse(stdout.trim());
-                            if (data.displays) {
-                                for (const d of data.displays) {
-                                    if (d.adapter && !d.adapter.includes('Virtual') && !d.adapter.includes('Microsoft')) {
-                                        resolve({ gpuName: d.adapter });
-                                        return;
-                                    }
-                                }
-                            }
+                            resolve(data.available
+                                ? { gpuName: data.name, available: true }
+                                : { gpuName: 'NVIDIA 独显不可用', available: false, error: localizeHostMessage(data.error) });
+                            return;
                         } catch (e) {}
                     }
-                    resolve({ gpuName: 'NVIDIA GeForce GPU' });
+                    resolve({ gpuName: 'GPU 检测失败', available: false, error: err?.message || '未知错误' });
                 });
             });
         });

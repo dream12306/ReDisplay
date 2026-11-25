@@ -21,6 +21,7 @@
 #include "display_manager.h"
 #include "macro_library.h"
 #include "encoder.h"
+#include "gpu_device.h"
 #include "capture.h"
 #include "bounded_frame_queue.h"
 #include "pen_input.h"
@@ -176,6 +177,8 @@ int main(int argc, char* argv[]) {
     int port = 27183;
     int prefDisplayIdx = -1;
     std::string prefSerial = "";
+    std::string transportMode = "usb";
+    std::string remoteAddress;
     std::string bufferMode = "lowlatency";
     uint8_t touchInputMode = TOUCH_INPUT_AUTO;
     int touchPressurePercent = 55;
@@ -213,6 +216,16 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "]}" << std::endl;
             return 0;
+        } else if (arg == "--gpu-info") {
+            NvencDeviceResult gpu = CreateNvencD3D11Device();
+            const bool available = gpu.device && gpu.context;
+            std::cout << "{\"type\":\"gpu\",\"available\":"
+                      << (available ? "true" : "false")
+                      << ",\"name\":\"" << EscapeJson(gpu.adapterName) << "\""
+                      << ",\"error\":\"" << EscapeJson(gpu.error) << "\"}" << std::endl;
+            if (gpu.context) gpu.context->Release();
+            if (gpu.device) gpu.device->Release();
+            return available ? 0 : 2;
         } else if (arg == "--list-devices") {
             AdbManager adb;
             if (adb.GetAdbPath().empty()) {
@@ -254,6 +267,10 @@ int main(int argc, char* argv[]) {
             touchPressurePercent = (std::max)(10, (std::min)(100, atoi(argv[++i])));
         } else if (arg == "--serial" && i + 1 < argc) {
             prefSerial = argv[++i];
+        } else if (arg == "--transport" && i + 1 < argc) {
+            transportMode = argv[++i];
+        } else if (arg == "--address" && i + 1 < argc) {
+            remoteAddress = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
             port = atoi(argv[++i]);
         } else if (arg == "--wheel-config" && i + 1 < argc) {
@@ -269,6 +286,28 @@ int main(int argc, char* argv[]) {
         } else if (i == 3 && arg[0] != '-') {
             bitrateMbps = atoi(argv[3]);
         }
+    }
+
+    const bool wirelessMode = transportMode == "wifi";
+    if (transportMode != "usb" && !wirelessMode) {
+        std::cerr << (isGui
+            ? "{\"type\":\"error\",\"message\":\"Invalid transport mode\"}"
+            : "[ERROR] --transport must be usb or wifi") << std::endl;
+        return 1;
+    }
+    if (port <= 0 || port > 65535) {
+        std::cerr << (isGui
+            ? "{\"type\":\"error\",\"message\":\"Invalid TCP port\"}"
+            : "[ERROR] TCP port must be between 1 and 65535") << std::endl;
+        return 1;
+    }
+    in_addr wirelessAddress{};
+    if (wirelessMode && (remoteAddress.empty()
+            || inet_pton(AF_INET, remoteAddress.c_str(), &wirelessAddress) != 1)) {
+        std::cerr << (isGui
+            ? "{\"type\":\"error\",\"message\":\"Invalid tablet IPv4 address\"}"
+            : "[ERROR] Wireless mode requires --address with a valid IPv4 address") << std::endl;
+        return 1;
     }
 
     // Load config.ini if present and not overridden
@@ -309,9 +348,30 @@ int main(int argc, char* argv[]) {
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 
+    // NVENC accepts only a D3D device created on an NVIDIA adapter. Creating a
+    // default hardware device is incorrect on hybrid laptops because Windows
+    // commonly returns the Intel iGPU. Preflight before touching the tablet so
+    // a disabled dGPU cannot cause an APK relaunch loop.
+    {
+        NvencDeviceResult preflightDevice = CreateNvencD3D11Device();
+        if (!preflightDevice.device) {
+            if (isGui) {
+                std::cout << "{\"type\":\"state\",\"status\":\"error\",\"fatal\":true,\"message\":\""
+                          << EscapeJson(preflightDevice.error) << "\"}" << std::endl;
+            } else {
+                std::cerr << "[GPU] " << preflightDevice.error << std::endl;
+            }
+            WSACleanup();
+            return 2;
+        }
+        std::cout << "[GPU] Selected NVENC adapter: " << preflightDevice.adapterName << std::endl;
+        preflightDevice.context->Release();
+        preflightDevice.device->Release();
+    }
+
     // 1. ADB Manager
     AdbManager adb;
-    if (adb.GetAdbPath().empty()) {
+    if (!wirelessMode && adb.GetAdbPath().empty()) {
         if (isGui) {
             std::cout << "{\"type\":\"state\",\"status\":\"error\",\"message\":\"ADB not found\"}" << std::endl;
         } else {
@@ -326,68 +386,82 @@ int main(int argc, char* argv[]) {
     // Main reconnect loop
     while (g_running) {
         if (isGui) {
-            std::cout << "{\"type\":\"state\",\"status\":\"detecting_devices\",\"message\":\"Scanning ADB devices...\"}" << std::endl;
+            std::cout << "{\"type\":\"state\",\"status\":\"detecting_devices\",\"message\":\""
+                      << (wirelessMode ? "Preparing Wi-Fi connection..." : "Scanning ADB devices...")
+                      << "\"}" << std::endl;
         } else {
-            std::cout << "\n[1/5] Detecting ADB devices..." << std::endl;
+            std::cout << (wirelessMode
+                ? "\n[1/5] Preparing direct Wi-Fi connection..."
+                : "\n[1/5] Detecting ADB devices...") << std::endl;
         }
-
-        auto devices = adb.GetDevices();
-        while (devices.empty() && g_running) {
-            if (isGui) {
-                std::cout << "{\"type\":\"state\",\"status\":\"waiting_device\",\"message\":\"Waiting for Android device connection...\"}" << std::endl;
-            } else {
-                std::cout << "\rWaiting for Android device to be connected via USB..." << std::flush;
-            }
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            devices = adb.GetDevices();
-        }
-        if (!g_running) break;
 
         std::string chosenSerial;
-        std::string chosenModel = "Unknown";
+        std::string chosenModel = wirelessMode ? "Wireless tablet" : "Unknown";
 
-        // Check if preferred serial was requested
-        if (!prefSerial.empty()) {
-            for (const auto& d : devices) {
-                if (d.serial == prefSerial) {
-                    chosenSerial = d.serial;
-                    chosenModel = d.model;
-                    break;
+        if (!wirelessMode) {
+            auto devices = adb.GetDevices();
+            while (devices.empty() && g_running) {
+                if (isGui) {
+                    std::cout << "{\"type\":\"state\",\"status\":\"waiting_device\",\"message\":\"Waiting for Android device connection...\"}" << std::endl;
+                } else {
+                    std::cout << "\rWaiting for Android device to be connected via USB..." << std::flush;
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                devices = adb.GetDevices();
+            }
+            if (!g_running) break;
+
+            // Check if preferred serial was requested
+            if (!prefSerial.empty()) {
+                for (const auto& d : devices) {
+                    if (d.serial == prefSerial) {
+                        chosenSerial = d.serial;
+                        chosenModel = d.model;
+                        break;
+                    }
                 }
             }
-        }
 
-        // Fallback: tablet first, then first device
-        if (chosenSerial.empty()) {
-            for (const auto& d : devices) {
-                if (!isGui) {
-                    std::cout << "  Found device: " << d.serial << " (" << d.model << ", " << d.product << ")" 
-                              << (d.is_tablet ? " [MATCHED TABLET]" : "") << std::endl;
-                }
-                if (d.is_tablet || chosenSerial.empty()) {
-                    chosenSerial = d.serial;
-                    chosenModel = d.model;
+            // Fallback: tablet first, then first device
+            if (chosenSerial.empty()) {
+                for (const auto& d : devices) {
+                    if (!isGui) {
+                        std::cout << "  Found device: " << d.serial << " (" << d.model << ", " << d.product << ")"
+                                  << (d.is_tablet ? " [MATCHED TABLET]" : "") << std::endl;
+                    }
+                    if (d.is_tablet || chosenSerial.empty()) {
+                        chosenSerial = d.serial;
+                        chosenModel = d.model;
+                    }
                 }
             }
-        }
 
-        if (isGui) {
-            std::cout << "{\"type\":\"device_selected\",\"serial\":\"" << chosenSerial 
-                      << "\",\"model\":\"" << chosenModel << "\"}" << std::endl;
-            std::cout << "{\"type\":\"state\",\"status\":\"connecting\",\"message\":\"Forwarding port " << port << "...\"}" << std::endl;
+            if (isGui) {
+                std::cout << "{\"type\":\"device_selected\",\"serial\":\"" << chosenSerial
+                          << "\",\"model\":\"" << chosenModel << "\"}" << std::endl;
+                std::cout << "{\"type\":\"state\",\"status\":\"connecting\",\"message\":\"Forwarding port " << port << "...\"}" << std::endl;
+            } else {
+                std::cout << "[2/5] Setting up port forward (tcp:" << port << " -> tcp:" << port << ")..." << std::endl;
+            }
+
+            adb.SetupPortForward(chosenSerial, port, port);
+
+            if (isGui) {
+                std::cout << "{\"type\":\"state\",\"status\":\"launching_app\",\"message\":\"Launching ReDisplay on " << chosenModel << "...\"}" << std::endl;
+            } else {
+                std::cout << "[3/5] Launching ReDisplay app on " << chosenModel << "..." << std::endl;
+            }
+            adb.LaunchClientApp(chosenSerial);
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
         } else {
-            std::cout << "[2/5] Setting up port forward (tcp:" << port << " -> tcp:" << port << ")..." << std::endl;
+            if (isGui) {
+                std::cout << "{\"type\":\"device_selected\",\"serial\":\"\",\"model\":\"Wi-Fi "
+                          << EscapeJson(remoteAddress) << "\"}" << std::endl;
+                std::cout << "{\"type\":\"state\",\"status\":\"connecting\",\"message\":\"Connecting to tablet over Wi-Fi...\"}" << std::endl;
+            } else {
+                std::cout << "[Wi-Fi] Connecting directly to " << remoteAddress << ":" << port << "..." << std::endl;
+            }
         }
-
-        adb.SetupPortForward(chosenSerial, port, port);
-
-        if (isGui) {
-            std::cout << "{\"type\":\"state\",\"status\":\"launching_app\",\"message\":\"Launching ReDisplay on " << chosenModel << "...\"}" << std::endl;
-        } else {
-            std::cout << "[3/5] Launching ReDisplay app on " << chosenModel << "..." << std::endl;
-        }
-        adb.LaunchClientApp(chosenSerial);
-        std::this_thread::sleep_for(std::chrono::milliseconds(800));
 
         // Connect TCP
         if (!isGui) {
@@ -407,7 +481,8 @@ int main(int argc, char* argv[]) {
             sockaddr_in addr = { 0 };
             addr.sin_family = AF_INET;
             addr.sin_port = htons(port);
-            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+            addr.sin_addr = wirelessMode ? wirelessAddress : in_addr{};
+            if (!wirelessMode) inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
             if (connect(sock, (sockaddr*)&addr, sizeof(addr)) == 0) {
                 if (!isGui) {
@@ -524,35 +599,36 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        // Create D3D11 Device
-        ID3D11Device* pD3DDevice = nullptr;
-        ID3D11DeviceContext* pD3DContext = nullptr;
-        D3D_FEATURE_LEVEL feat;
-        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 
-                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, 
-                                       D3D11_SDK_VERSION, &pD3DDevice, &feat, &pD3DContext);
-        if (FAILED(hr)) {
+        // Create the D3D11 device on the NVIDIA adapter explicitly. A default
+        // D3D device may be Intel even when a working NVIDIA GPU is present.
+        NvencDeviceResult gpuDevice = CreateNvencD3D11Device();
+        ID3D11Device* pD3DDevice = gpuDevice.device;
+        ID3D11DeviceContext* pD3DContext = gpuDevice.context;
+        if (!pD3DDevice || !pD3DContext) {
             if (isGui) {
-                std::cout << "{\"type\":\"state\",\"status\":\"error\",\"message\":\"D3D11 device creation failed\"}" << std::endl;
+                std::cout << "{\"type\":\"state\",\"status\":\"error\",\"fatal\":true,\"message\":\""
+                          << EscapeJson(gpuDevice.error) << "\"}" << std::endl;
             } else {
-                std::cerr << "[D3D11] Failed to create device" << std::endl;
+                std::cerr << "[GPU] " << gpuDevice.error << std::endl;
             }
             closesocket(sock);
-            continue;
+            WSACleanup();
+            return 2;
         }
 
         // Initialize NVENC
         NvEncoderD3D11 encoder;
         if (!encoder.Initialize(pD3DDevice, targetWidth, targetHeight, targetFps, bitrateMbps)) {
             if (isGui) {
-                std::cout << "{\"type\":\"state\",\"status\":\"error\",\"message\":\"NVENC encoder initialization failed\"}" << std::endl;
+                std::cout << "{\"type\":\"state\",\"status\":\"error\",\"fatal\":true,\"message\":\"NVENC initialization failed. Check the NVIDIA driver and GPU mode.\"}" << std::endl;
             } else {
                 std::cerr << "[NVENC] Encoder initialization failed" << std::endl;
             }
             pD3DContext->Release();
             pD3DDevice->Release();
             closesocket(sock);
-            continue;
+            WSACleanup();
+            return 2;
         }
 
         // Streaming Stats & Active Motion Cadence Tracker
@@ -638,7 +714,7 @@ int main(int argc, char* argv[]) {
 
         if (!captureOk) {
             if (isGui) {
-                std::cout << "{\"type\":\"state\",\"status\":\"error\",\"message\":\"Screen capture initialization failed\"}" << std::endl;
+                std::cout << "{\"type\":\"state\",\"status\":\"error\",\"fatal\":true,\"message\":\"Screen capture initialization failed\"}" << std::endl;
             } else {
                 std::cerr << "[Capture] Failed to initialize screen capture" << std::endl;
             }
@@ -649,7 +725,8 @@ int main(int argc, char* argv[]) {
             pD3DContext->Release();
             pD3DDevice->Release();
             closesocket(sock);
-            continue;
+            WSACleanup();
+            return 2;
         }
 
         capture.Start();

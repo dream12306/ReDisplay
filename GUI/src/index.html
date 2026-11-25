@@ -18,7 +18,7 @@
                 <img src="../assets/icon.png" width="22" height="22" style="border-radius: 5px; display: block;" alt="ReDisplay">
             </div>
             <span class="app-title">ReDisplay</span>
-            <span class="version-tag">v1.8.3</span>
+                <span class="version-tag">v1.9.1</span>
             <div id="status-pill" class="status-badge status-idle">
                 <span class="badge-dot"></span>
                 <span id="status-text">待机就绪</span>
@@ -175,8 +175,19 @@
                     <span class="card-subtitle">支持任意安卓平板/手机与 Windows 虚拟副屏联动</span>
                 </div>
 
-                <!-- Device Selector -->
                 <div class="form-group">
+                    <div class="label-row">
+                        <label>连接方式</label>
+                        <span class="preset-mode-tag" id="val-transport-mode">USB 有线</span>
+                    </div>
+                    <div class="segmented-control" id="seg-transport">
+                        <button class="seg-btn active" data-transport="usb">USB 有线</button>
+                        <button class="seg-btn" data-transport="wifi">Wi‑Fi 手动 IP</button>
+                    </div>
+                </div>
+
+                <!-- Device Selector -->
+                <div class="form-group" id="usb-device-group">
                     <div class="label-row">
                         <label for="select-device">目标安卓设备</label>
                         <div class="btn-group-inline">
@@ -187,6 +198,20 @@
                     <select id="select-device" class="md3-select">
                         <option value="">正在检测 ADB 设备...</option>
                     </select>
+                </div>
+
+                <div class="form-group hidden" id="wireless-device-group">
+                    <div class="label-row">
+                        <label for="input-wireless-address">平板无线地址</label>
+                        <button id="btn-test-wireless" class="text-btn text-btn-highlight">测试连接</button>
+                    </div>
+                    <div class="connection-address-row">
+                        <input id="input-wireless-address" class="md3-input" type="text"
+                               inputmode="decimal" autocomplete="off" placeholder="例如 192.168.137.86">
+                        <input id="input-wireless-port" class="md3-input port-input" type="number"
+                               min="1" max="65535" value="27183" aria-label="无线端口">
+                    </div>
+                    <span class="setting-help" id="wireless-test-status">请在平板 ReDisplay 首页查看当前 Wi‑Fi IPv4 地址；首版仅限可信的电脑热点或局域网</span>
                 </div>
 
                 <!-- Display Selector -->

@@ -7,6 +7,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const packageJson = require(path.join(projectRoot, 'package.json'));
 const { resolveHostExePath } = require('../lib/runtime-paths');
 const { normalizeTouchConfig } = require('../lib/touch-config');
+const { isValidIpv4, splitAddress, normalizeConnectionConfig } = require('../lib/connection-config');
 
 assert.strictEqual(
     packageJson.build.portable && packageJson.build.portable.unpackDirName,
@@ -21,6 +22,15 @@ assert.deepStrictEqual(
     normalizeTouchConfig({ touchInput: 'finger', touchPressure: 120 }),
     { touchInput: 'finger', touchPressure: 100 },
     'finger input configuration must clamp pressure before reaching Host'
+);
+assert.strictEqual(isValidIpv4('192.168.137.86'), true);
+assert.strictEqual(isValidIpv4('192.168.1.999'), false);
+assert.deepStrictEqual(splitAddress('192.168.137.86:27184'), {
+    address: '192.168.137.86', port: 27184
+});
+assert.deepStrictEqual(
+    normalizeConnectionConfig({ transport: 'wifi', wirelessAddress: '192.168.137.86', wirelessPort: 27183 }),
+    { transport: 'wifi', wirelessAddress: '192.168.137.86', wirelessPort: 27183 }
 );
 assert.deepStrictEqual(
     normalizeTouchConfig({ touchInput: 'invalid', touchPressure: 'bad' }),

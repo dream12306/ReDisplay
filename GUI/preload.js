@@ -9,11 +9,14 @@ contextBridge.exposeInMainWorld('api', {
 
     // Service controls
     startStream: (config) => ipcRenderer.invoke('start-stream', config),
-    stopStream: (serial) => ipcRenderer.invoke('stop-stream', serial),
+    stopStream: (config) => ipcRenderer.invoke('stop-stream', config),
     restartStream: (config) => ipcRenderer.invoke('restart-stream', config),
     getServiceStatus: () => ipcRenderer.invoke('get-service-status'),
     getTouchConfig: () => ipcRenderer.invoke('get-touch-config'),
     saveTouchConfig: (config) => ipcRenderer.invoke('save-touch-config', config),
+    getConnectionConfig: () => ipcRenderer.invoke('get-connection-config'),
+    saveConnectionConfig: (config) => ipcRenderer.invoke('save-connection-config', config),
+    testWirelessConnection: (config) => ipcRenderer.invoke('test-wireless-connection', config),
     getWheelConfig: () => ipcRenderer.invoke('get-wheel-config'),
     saveWheelConfig: (config) => ipcRenderer.invoke('save-wheel-config', config),
     resetWheelConfig: () => ipcRenderer.invoke('reset-wheel-config'),

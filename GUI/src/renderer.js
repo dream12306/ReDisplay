@@ -40,6 +40,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnRefreshDevices = document.getElementById('btn-refresh-devices');
     const btnTestUsb = document.getElementById('btn-test-usb');
     const btnInstallApk = document.getElementById('btn-install-apk'); // guarded
+    const segTransportBtns = document.querySelectorAll('#seg-transport .seg-btn');
+    const valTransportMode = document.getElementById('val-transport-mode');
+    const usbDeviceGroup = document.getElementById('usb-device-group');
+    const wirelessDeviceGroup = document.getElementById('wireless-device-group');
+    const inputWirelessAddress = document.getElementById('input-wireless-address');
+    const inputWirelessPort = document.getElementById('input-wireless-port');
+    const btnTestWireless = document.getElementById('btn-test-wireless');
+    const wirelessTestStatus = document.getElementById('wireless-test-status');
 
     // Display & Resolution Controls
     const selectDisplay = document.getElementById('select-display');
@@ -108,6 +116,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // App State
     let isStreaming = false;
+    let streamOperationPending = false;
     let currentProfile = 'esports';
     let currentFps = 120;
     let currentBitrate = 60;
@@ -117,6 +126,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentOrientation = 'portrait';
     let currentTouchInput = 'auto';
     let currentTouchPressure = 55;
+    let currentTransport = 'usb';
+    let currentWirelessAddress = '';
+    let currentWirelessPort = 27183;
     let currentGpuName = '独立 GPU (NVENC)';
     let devicesList = [];
     let displaysList = [];
@@ -137,7 +149,10 @@ document.addEventListener('DOMContentLoaded', () => {
         bufferMode: 'lowlatency',
         orientation: 'portrait',
         touchInput: 'auto',
-        touchPressure: 55
+        touchPressure: 55,
+        transport: 'usb',
+        wirelessAddress: '',
+        wirelessPort: 27183
     };
     let reconfigTimer = null;
     let reconfigInterval = null;
@@ -198,6 +213,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (res && res.gpuName) {
                 currentGpuName = res.gpuName;
                 statGpuDesc.textContent = currentGpuName; // Only show GPU model, no wrapping text!
+                if (res.available === false) {
+                    appendLog(res.error || 'NVIDIA 独显当前不可用，NVENC 无法启动。', 'warn');
+                }
             }
         } catch (e) {
             statGpuDesc.textContent = '独立显卡';
@@ -206,11 +224,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 5. Device Enumeration & Auto-Adaptation
     async function inspectDevice(serial) {
-        if (!serial) return;
+        if (!serial || currentTransport !== 'usb') return;
 
         // Check if APK is installed
         try {
             const checkRes = await window.api.checkClientInstalled(serial);
+            if (currentTransport !== 'usb') return;
             isClientInstalled = checkRes.installed && !checkRes.outdated;
             if (isClientInstalled) {
                 dotApk.className = 'status-dot status-dot-online';
@@ -236,6 +255,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Probe Device Specs (Resolution, Refresh Rate, USB Speed)
         try {
             const specs = await window.api.detectDeviceSpecs(serial);
+            if (currentTransport !== 'usb') return;
             if (specs.usbTier) {
                 statUsbDesc.textContent = specs.usbTier; // No extra prefix to prevent line wrap!
                 if (specs.usbTier.includes('10Gbps')) {
@@ -271,6 +291,7 @@ document.addEventListener('DOMContentLoaded', () => {
         appendLog('正在扫描连接的 ADB 设备...');
         try {
             devicesList = await window.api.getDevices();
+            if (currentTransport !== 'usb') return;
             selectDevice.innerHTML = '';
 
             if (devicesList.length === 0) {
@@ -322,6 +343,104 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     btnRefreshDevices.addEventListener('click', loadDevices);
+
+    function updateTransportUi() {
+        const wireless = currentTransport === 'wifi';
+        segTransportBtns.forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.transport === currentTransport);
+        });
+        usbDeviceGroup.classList.toggle('hidden', wireless);
+        wirelessDeviceGroup.classList.toggle('hidden', !wireless);
+        valTransportMode.textContent = wireless ? 'Wi‑Fi 无线' : 'USB 有线';
+        statProtoDesc.textContent = wireless
+            ? 'Wi‑Fi 局域网 · TCP 直连 (27183)'
+            : 'ADB 隧道 · TCP 直连 (27183)';
+        badgeUsbTier.textContent = wireless ? 'Wi‑Fi' : 'USB';
+        statUsbDesc.textContent = wireless ? '电脑热点 / 同一局域网' : statUsbDesc.textContent;
+        if (wireless) {
+            dotDevice.className = currentWirelessAddress
+                ? 'status-dot status-dot-warning'
+                : 'status-dot status-dot-offline';
+            valDevice.textContent = currentWirelessAddress || '等待输入平板 IP';
+            dotApk.className = 'status-dot status-dot-online';
+            valApk.textContent = '请在平板手动打开';
+            btnStatusApk.classList.add('hidden');
+        } else {
+            loadDevices();
+        }
+    }
+
+    async function persistConnectionConfig() {
+        const result = await window.api.saveConnectionConfig({
+            transport: currentTransport,
+            wirelessAddress: currentWirelessAddress,
+            wirelessPort: currentWirelessPort
+        });
+        if (!result.success) appendLog(`连接设置保存失败: ${result.error}`, 'error');
+    }
+
+    function setTransport(transport, persist = true) {
+        currentTransport = transport === 'wifi' ? 'wifi' : 'usb';
+        updateTransportUi();
+        window.api.notifyConfigChanged(buildStreamConfig());
+        if (persist) persistConnectionConfig();
+    }
+
+    function readWirelessFields() {
+        let address = inputWirelessAddress.value.trim();
+        let port = Number.parseInt(inputWirelessPort.value, 10) || 27183;
+        const separator = address.lastIndexOf(':');
+        if (separator > 0 && address.indexOf(':') === separator) {
+            const inlinePort = Number.parseInt(address.slice(separator + 1), 10);
+            if (inlinePort >= 1 && inlinePort <= 65535) port = inlinePort;
+            address = address.slice(0, separator).trim();
+        }
+        currentWirelessAddress = address;
+        currentWirelessPort = Math.max(1, Math.min(65535, port));
+        inputWirelessAddress.value = currentWirelessAddress;
+        inputWirelessPort.value = currentWirelessPort;
+        if (currentTransport === 'wifi') {
+            valDevice.textContent = currentWirelessAddress || '等待输入平板 IP';
+        }
+    }
+
+    segTransportBtns.forEach(btn => {
+        btn.addEventListener('click', () => setTransport(btn.dataset.transport, true));
+    });
+
+    inputWirelessAddress.addEventListener('change', () => {
+        readWirelessFields();
+        persistConnectionConfig();
+    });
+    inputWirelessPort.addEventListener('change', () => {
+        readWirelessFields();
+        persistConnectionConfig();
+    });
+
+    btnTestWireless.addEventListener('click', async () => {
+        readWirelessFields();
+        btnTestWireless.disabled = true;
+        btnTestWireless.textContent = '测试中…';
+        wirelessTestStatus.textContent = '正在连接平板…';
+        const result = await window.api.testWirelessConnection({
+            transport: 'wifi',
+            wirelessAddress: currentWirelessAddress,
+            wirelessPort: currentWirelessPort
+        });
+        btnTestWireless.disabled = false;
+        btnTestWireless.textContent = '测试连接';
+        if (result.success) {
+            wirelessTestStatus.textContent = `连接成功 · ${result.latencyMs} ms`;
+            dotDevice.className = 'status-dot status-dot-online';
+            valDevice.textContent = `Wi‑Fi ${currentWirelessAddress}`;
+            appendLog(`无线连接测试成功：${currentWirelessAddress}:${currentWirelessPort} (${result.latencyMs} ms)`);
+            persistConnectionConfig();
+        } else {
+            wirelessTestStatus.textContent = `连接失败：${result.error}`;
+            dotDevice.className = 'status-dot status-dot-offline';
+            appendLog(`无线连接测试失败：${result.error}`, 'error');
+        }
+    });
 
     // 6. USB Cable Benchmark Test
     btnTestUsb.addEventListener('click', async () => {
@@ -518,6 +637,9 @@ document.addEventListener('DOMContentLoaded', () => {
             orientation: currentOrientation,
             touchInput: currentTouchInput,
             touchPressure: currentTouchPressure,
+            transport: currentTransport,
+            wirelessAddress: currentWirelessAddress,
+            wirelessPort: currentWirelessPort,
             port: 27183
         };
     }
@@ -532,7 +654,10 @@ document.addEventListener('DOMContentLoaded', () => {
             bufferMode: currentBufferMode,
             orientation: currentOrientation,
             touchInput: currentTouchInput,
-            touchPressure: currentTouchPressure
+            touchPressure: currentTouchPressure,
+            transport: currentTransport,
+            wirelessAddress: currentWirelessAddress,
+            wirelessPort: currentWirelessPort
         };
     }
 
@@ -545,6 +670,11 @@ document.addEventListener('DOMContentLoaded', () => {
         setBufferMode(cfg.bufferMode || 'lowlatency', false, false);
         setTouchInput(cfg.touchInput || 'auto', false);
         setTouchPressure(cfg.touchPressure || 55, false);
+        currentWirelessAddress = cfg.wirelessAddress || '';
+        currentWirelessPort = cfg.wirelessPort || 27183;
+        inputWirelessAddress.value = currentWirelessAddress;
+        inputWirelessPort.value = currentWirelessPort;
+        setTransport(cfg.transport || 'usb', false);
         if (cfg.width && cfg.height) {
             setResolution(cfg.width, cfg.height, false);
         } else if (cfg.orientation) {
@@ -890,7 +1020,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 15. Start / Stop Streaming Pipeline
     async function startStream() {
-        const chosenSerial = selectDevice.value;
+        if (streamOperationPending) return;
+        streamOperationPending = true;
+        btnToggleStream.disabled = true;
+        try {
+        readWirelessFields();
+        const chosenSerial = currentTransport === 'usb' ? selectDevice.value : '';
+
+        if (currentTransport === 'wifi' && !currentWirelessAddress) {
+            setStatus('error', '无线地址无效');
+            appendLog('请输入平板显示的 Wi‑Fi IPv4 地址', 'error');
+            inputWirelessAddress.focus();
+            return;
+        }
 
         // Auto-check APK before streaming
         if (chosenSerial && !isClientInstalled) {
@@ -913,26 +1055,39 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const config = buildStreamConfig();
+        await persistConnectionConfig();
         savedConfig = captureCurrentConfig(); // Sync savedConfig on initial start
 
         setStatus('connecting', '正在初始化...');
-        appendLog(`启动串流: 目标=${config.serial || '自动'} | 显示器=${config.display !== null ? config.display : '自动'} | ${config.width}x${config.height} @${config.fps}Hz | ${config.bitrate}Mbps | 缓冲:${config.bufferMode}`);
+        appendLog(`启动串流: ${config.transport === 'wifi' ? `Wi‑Fi ${config.wirelessAddress}:${config.wirelessPort}` : `USB ${config.serial || '自动'}`} | 显示器=${config.display !== null ? config.display : '自动'} | ${config.width}x${config.height} @${config.fps}Hz | ${config.bitrate}Mbps | 缓冲:${config.bufferMode}`);
 
         const res = await window.api.startStream(config);
         if (!res.success) {
             setStatus('error', '启动失败');
             appendLog(`启动失败: ${res.error}`, 'error');
         }
+        } finally {
+            streamOperationPending = false;
+            btnToggleStream.disabled = false;
+        }
     }
 
     async function stopStream() {
-        const chosenSerial = selectDevice.value;
+        if (streamOperationPending) return;
+        streamOperationPending = true;
+        btnToggleStream.disabled = true;
+        try {
+        const config = buildStreamConfig();
         hideReconfigBanner();
         setStatus('idle', '待机就绪');
         appendLog('正在停止副屏服务并释放通道...');
-        await window.api.stopStream(chosenSerial);
+        await window.api.stopStream(config);
         resetStats();
         appendLog('副屏服务已停止，通道已清理，安卓端已退出占用。', 'info');
+        } finally {
+            streamOperationPending = false;
+            btnToggleStream.disabled = false;
+        }
     }
 
     btnToggleStream.addEventListener('click', () => {
@@ -987,6 +1142,9 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (data.status === 'error') {
                 setStatus('error', data.message || '发生错误');
                 appendLog(`[Host Error] ${data.message}`, 'error');
+                if (data.fatal) {
+                    appendLog('该错误不会自动重试；请排除显卡状态/驱动问题后再次启动。', 'warn');
+                }
             }
         } else if (data.type === 'device_selected') {
             appendLog(`[Host] 绑定设备: ${data.model} (${data.serial})`);
@@ -1299,8 +1457,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadEditors() {
         try {
-            const [library, config, touchConfig] = await Promise.all([
-                window.api.getMacroLibrary(), window.api.getWheelConfig(), window.api.getTouchConfig()
+            const [library, config, touchConfig, connectionConfig] = await Promise.all([
+                window.api.getMacroLibrary(), window.api.getWheelConfig(), window.api.getTouchConfig(),
+                window.api.getConnectionConfig()
             ]);
             macroLibraryState = library;
             selectedMacroId = library.items[0]?.id || null;
@@ -1309,6 +1468,11 @@ document.addEventListener('DOMContentLoaded', () => {
             renderWheelConfig(config);
             setTouchInput(touchConfig.touchInput, false);
             setTouchPressure(touchConfig.touchPressure, false);
+            currentWirelessAddress = connectionConfig.wirelessAddress;
+            currentWirelessPort = connectionConfig.wirelessPort;
+            inputWirelessAddress.value = currentWirelessAddress;
+            inputWirelessPort.value = currentWirelessPort;
+            setTransport(connectionConfig.transport, false);
         } catch (error) {
             wheelSaveStatus.textContent = `加载失败: ${error.message}`;
             macroSaveStatus.textContent = `加载失败: ${error.message}`;

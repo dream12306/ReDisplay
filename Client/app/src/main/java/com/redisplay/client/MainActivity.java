@@ -6,6 +6,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.graphics.Color;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -62,6 +65,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     private int touchPressurePercent = TouchInputConfig.DEFAULT_PRESSURE_PERCENT;
     private long lastStylusEventMs = -10_000L;
     private Runnable commitFingerRunnable;
+    private boolean hostConnected = false;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     private final ServiceConnection serviceConn = new ServiceConnection() {
         @Override
@@ -119,7 +125,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         statsOverlay.setTextSize(13);
         statsOverlay.setPadding(30, 30, 30, 30);
         statsOverlay.setBackgroundColor(Color.parseColor("#80000000"));
-        statsOverlay.setText("ReDisplay 等待主机连接...\n小米手写笔: Windows Ink | 手指双击切换画面模式");
+        statsOverlay.setText(waitingConnectionText());
         statsOverlay.setVisibility(View.VISIBLE);
         FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -134,6 +140,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         ));
 
         setContentView(rootLayout);
+        registerNetworkStatusCallback();
 
         fingerGestureState = new FingerGestureState(
                 ViewConfiguration.get(this).getScaledTouchSlop(), 110L);
@@ -147,7 +154,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
             }
         };
 
-        hideOverlayRunnable = () -> statsOverlay.setVisibility(View.GONE);
+        hideOverlayRunnable = () -> {
+            // Keep the manually-entered Wi-Fi address visible until a Host is
+            // connected. During streaming the overlay returns to auto-hide.
+            if (hostConnected) statsOverlay.setVisibility(View.GONE);
+        };
         handler.postDelayed(hideOverlayRunnable, 4000);
 
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
@@ -837,6 +848,43 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         handler.postDelayed(hideOverlayRunnable, 3000);
     }
 
+    private String waitingConnectionText() {
+        String wifiAddress = NetworkAddressProvider.currentWifiIpv4(this);
+        String wirelessLine = wifiAddress == null
+                ? "无线：请先连接电脑热点或 Wi‑Fi"
+                : "无线 IP：" + wifiAddress + ":" + NetworkServer.PORT;
+        return "ReDisplay 等待主机连接...\n" + wirelessLine
+                + "\nUSB：连接数据线后由电脑端自动启动";
+    }
+
+    private void registerNetworkStatusCallback() {
+        connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivityManager == null) return;
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) { refreshWaitingConnectionText(); }
+
+            @Override
+            public void onLinkPropertiesChanged(Network network, LinkProperties properties) {
+                refreshWaitingConnectionText();
+            }
+
+            @Override
+            public void onLost(Network network) { refreshWaitingConnectionText(); }
+        };
+        connectivityManager.registerDefaultNetworkCallback(networkCallback);
+    }
+
+    private void refreshWaitingConnectionText() {
+        handler.post(() -> {
+            if (!hostConnected && statsOverlay != null) {
+                statsOverlay.setTextColor(Color.GREEN);
+                statsOverlay.setText(waitingConnectionText());
+                statsOverlay.setVisibility(View.VISIBLE);
+            }
+        });
+    }
+
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i(TAG, "Surface created, attaching to decoder");
@@ -858,6 +906,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onConnected(String hostInfo) {
         handler.post(() -> {
+            hostConnected = true;
             statsOverlay.setTextColor(Color.GREEN);
             statsOverlay.setText("已连接: " + hostInfo + "\nWindows Ink 已启用 · 小米手写笔可直接书写");
             statsOverlay.setVisibility(View.VISIBLE);
@@ -872,6 +921,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onDisconnected() {
         handler.post(() -> {
+            hostConnected = false;
             handler.removeCallbacks(commitFingerRunnable);
             if (fingerGestureState != null) fingerGestureState.onCancel();
             fingerPrimaryPointerId = -1;
@@ -884,7 +934,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
             wheelGestureGuard.reset();
             if (wheelOverlay != null) wheelOverlay.dismiss();
             statsOverlay.setTextColor(Color.GREEN);
-            statsOverlay.setText("主机已断开，等待重新连接...\n端口: 27183");
+            statsOverlay.setText(waitingConnectionText());
             statsOverlay.setVisibility(View.VISIBLE);
             if (displayService != null) {
                 displayService.updateNotificationText("等待主机连接...");
@@ -952,6 +1002,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(commitFingerRunnable);
+        if (connectivityManager != null && networkCallback != null) {
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+            } catch (IllegalArgumentException ignored) {}
+        }
         if (serviceConn != null) {
             unbindService(serviceConn);
         }

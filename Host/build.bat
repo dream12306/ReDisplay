@@ -46,6 +46,17 @@ if %errorlevel% neq 0 exit /b 1
 del "%HOST_DIR%stream_latency_policy_test.exe" >nul 2>&1
 del "%HOST_DIR%stream_latency_policy_test.obj" >nul 2>&1
 
+echo Running GPU adapter selection regression tests...
+cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
+    /I "%SRC_DIR%" ^
+    "%HOST_DIR%tests\gpu_adapter_policy_test.cpp" ^
+    /Fe:"%HOST_DIR%gpu_adapter_policy_test.exe"
+if %errorlevel% neq 0 exit /b 1
+"%HOST_DIR%gpu_adapter_policy_test.exe"
+if %errorlevel% neq 0 exit /b 1
+del "%HOST_DIR%gpu_adapter_policy_test.exe" >nul 2>&1
+del "%HOST_DIR%gpu_adapter_policy_test.obj" >nul 2>&1
+
 echo Running ADB path resolution regression test...
 cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
     /I "%SRC_DIR%" ^
@@ -151,6 +162,7 @@ cl.exe /nologo /EHsc /std:c++20 /O2 /MD ^
     "%SRC_DIR%\wheel_config.cpp" ^
     "%SRC_DIR%\macro_library.cpp" ^
     "%SRC_DIR%\encoder.cpp" ^
+    "%SRC_DIR%\gpu_device.cpp" ^
     "%SRC_DIR%\capture.cpp" ^
     /link /OUT:"%HOST_DIR%ReDisplayHost.exe" ^
     windowsapp.lib d3d11.lib dxgi.lib ws2_32.lib user32.lib
